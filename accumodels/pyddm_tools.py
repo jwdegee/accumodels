@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+# encoding: utf-8
+
 import os
 import numpy as np
 import pandas as pd
@@ -19,28 +22,6 @@ from ddm import set_N_cpus
 from IPython import embed as shell
 
 set_N_cpus(16)
-
-matplotlib.rcParams['pdf.fonttype'] = 42
-matplotlib.rcParams['ps.fonttype'] = 42
-sns.set(style='ticks', font='Arial', font_scale=1, rc={
-    'axes.labelsize': 7,
-    'axes.titlesize': 7,
-    'xtick.labelsize': 6,
-    'ytick.labelsize': 6,
-    'legend.fontsize': 6,
-    'axes.linewidth': 0.25,
-    'xtick.major.width': 0.25,
-    'ytick.major.width': 0.25,
-    'ytick.major.width': 0.25,
-    'ytick.major.width': 0.25,
-    'ytick.major.pad' : 2.0,
-    'ytick.minor.pad' : 2.0,
-    'xtick.major.pad' : 2.0,
-    'xtick.minor.pad' : 2.0,
-    'axes.labelpad' : 4.0,
-    'axes.titlepad' : 6.0,
-    } )
-sns.plotting_context()
 
 def make_z(n_bins, z_bin=False):
     if z_bin:
