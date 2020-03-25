@@ -143,7 +143,7 @@ def summary_plot_group(df_group, df_sim_group=None, quantiles=[0, 0.1, 0.3, 0.5,
     ax.set_xlabel('RT (s)')
     ax.set_ylabel('Trials (prob. dens.)')
 
-    # condition response plots:
+    # conditional response plots:
     ax = fig.add_subplot(1,4,4)
     df_group.loc[:,'rt_bin'] = df_group.groupby(['subj_idx'])['rt'].apply(pd.qcut, quantiles, labels=False)
     d = df_group.groupby(['subj_idx', 'rt_bin']).mean().reset_index()
@@ -159,7 +159,7 @@ def summary_plot_group(df_group, df_sim_group=None, quantiles=[0, 0.1, 0.3, 0.5,
     plt.axhline(0.5, lw=0.5, color='k')
     if xlim:
         ax.set_xlim(xlim)
-    ax.set_ylim(0, 0.75)
+    ax.set_ylim(0, 0.9)
     ax.set_title('Conditional response')
     ax.set_xlabel('RT (quantiles)')
     ax.set_ylabel('P(bias)')

@@ -17,11 +17,11 @@ from ddm import models
 from ddm import Model, Fittable, Fitted, Bound, Overlay, Solution
 from ddm.functions import fit_adjust_model, display_model
 from ddm.models import DriftConstant, NoiseConstant, BoundConstant, OverlayChain, OverlayNonDecision, OverlayPoissonMixture, OverlayUniformMixture, InitialCondition, ICPoint, ICPointSourceCenter, LossBIC
-from ddm import set_N_cpus
+# from ddm import set_N_cpus
 
 from IPython import embed as shell
 
-set_N_cpus(16)
+# set_N_cpus(16)
 
 def make_z(n_bins, z_bin=False):
     if z_bin:
@@ -29,10 +29,10 @@ def make_z(n_bins, z_bin=False):
     else:
         z_names = ['z']
     class StartingPoint(InitialCondition):
-        name = "A starting point."
+        name = 'A starting point.'
         required_parameters = z_names
         if z_bin:
-            required_conditions = ["bin"]
+            required_conditions = ['bin']
         def get_IC(self, x, dx, conditions):
             pdf = np.zeros(len(x))
             if z_bin:
@@ -43,63 +43,63 @@ def make_z(n_bins, z_bin=False):
             return pdf
     return StartingPoint
 
-def make_drift(n_bins, v_bin=False, dc_bin=False):
+def make_drift(n_bins, v_bin=False, b_bin=False):
     if v_bin:
         v_names = ['v{}'.format(i) for i in range(n_bins)]
     else:
         v_names = ['v']
-    if dc_bin:
-        dc_names = ['b{}'.format(i) for i in range(n_bins)]
+    if b_bin:
+        b_names = ['b{}'.format(i) for i in range(n_bins)]
     else:
-        dc_names = ['b']
+        b_names = ['b']
     class DriftStimulusCoding(ddm.models.Drift):
-        name = "Drift"
-        required_parameters = v_names + dc_names
-        if v_bin or dc_bin:
-            required_conditions = ["stimulus", "bin"]
+        name = 'Drift'
+        required_parameters = v_names + b_names
+        if v_bin or b_bin:
+            required_conditions = ['stimulus', 'bin']
         else:
-            required_conditions = ["stimulus"]
+            required_conditions = ['stimulus']
         def get_drift(self, conditions, **kwargs):
             if v_bin:
                 v_param = getattr(self, 'v{}'.format(conditions['bin']))
             else:
                 v_param = self.v
-            if dc_bin:
-                dc_param = getattr(self, 'b{}'.format(conditions['bin']))
+            if b_bin:
+                b_param = getattr(self, 'b{}'.format(conditions['bin']))
             else:
-                dc_param = self.b
-            return dc_param + (v_param * conditions['stimulus'])
+                b_param = self.b
+            return b_param + (v_param * conditions['stimulus'])
     return DriftStimulusCoding
 
-def make_a(n_bins, a_bin=False, bound_collapse=False):
+def make_a(n_bins, a_bin=False, u_bin=False, urgency=False):
     if a_bin:
         a_names = ['a{}'.format(i) for i in range(n_bins)]
-        if bound_collapse:
-            c_names = ['c{}'.format(i) for i in range(n_bins)]
-        else:
-            c_names = []
     else:
         a_names = ['a']
-        if bound_collapse:
-            c_names = ['c']
+    if urgency:
+        if u_bin:
+            u_names = ['u{}'.format(i) for i in range(n_bins)]
         else:
-            c_names = []
+            u_names = ['u']
+    else:
+        u_names = []
+
     class BoundCollapsingHyperbolic(Bound):
-        name = "Hyperbolic collapsing bounds"
-        required_parameters = a_names + c_names
-        if a_bin:
-            required_conditions = ["bin"]
+        name = 'Hyperbolic collapsing bounds'
+        required_parameters = a_names + u_names
+        if a_bin or u_bin:
+            required_conditions = ['bin']
         def get_bound(self, t, conditions, **kwargs):
             if a_bin:
                 a_param = getattr(self, 'a{}'.format(conditions['bin']))
-                if bound_collapse:
-                    c_param = getattr(self, 'c{}'.format(conditions['bin']))
             else:
                 a_param = self.a
-                if bound_collapse:
-                    c_param = self.c
-            if bound_collapse:
-                return a_param-(a_param*(t/(t+c_param)))
+            if urgency:
+                if u_bin:
+                    u_param = getattr(self, 'u{}'.format(conditions['bin']))
+                else:
+                    u_param = self.u
+                return a_param-(a_param*(t/(t+u_param)))
             else:
                 return a_param
     return BoundCollapsingHyperbolic
@@ -110,10 +110,10 @@ def make_t(n_bins, t_bin=False):
     else:
         t_names = ['t']
     class NonDecisionTime(Overlay):
-        name = "Non-decision time"
+        name = 'Non-decision time'
         required_parameters = t_names
         if t_bin:
-            required_conditions = ["bin"]
+            required_conditions = ['bin']
         def apply(self, solution):
             # Unpack solution object
             corr = solution.corr
@@ -142,22 +142,60 @@ def make_t(n_bins, t_bin=False):
             return Solution(newcorr, newerr, m, cond, undec)
     return NonDecisionTime
 
+
+def make_z_reg():
+    class StartingPoint(InitialCondition):
+        name = 'A starting point.'
+        required_parameters = ['z', 'z_coeff']
+        required_conditions = ['physio']
+        def get_IC(self, x, dx, conditions):
+            pdf = np.zeros(len(x))
+            z_param = self.z + (self.z_coeff * conditions['physio'])
+            pdf[int(len(pdf)*z_param)] = 1
+            return pdf
+    return StartingPoint
+
+
+def make_drift_regression(v_reg=True, b_reg=True):
+    if v_reg:
+        v_names = ['v', 'v_coeff']
+    else:
+        v_names = ['v']
+    if b_bin:
+        b_names = ['b', 'b_coeff']
+    else:
+        b_names = ['b']
+    class DriftStimulusCoding(ddm.models.Drift):
+        name = 'Drift'
+        required_parameters = v_names + b_names
+        required_conditions = ['stimulus', 'physio']
+        def get_drift(self, conditions, **kwargs):
+            if v_reg and not b_reg:
+                return self.b + (self.v * conditions['stimulus']) + (self.v_coeff * conditions['stimulus'] * conditions['physio'])
+            elif b_reg and not v_reg:
+                return self.b + (self.v * conditions['stimulus']) + (self.b_coeff * conditions['physio'])
+            elif v_reg and b_reg:
+                return self.b + (self.v * conditions['stimulus']) + (self.v_coeff * conditions['stimulus'] * conditions['physio']) + (self.b_coeff * conditions['physio'])
+    return DriftStimulusCoding
+
 def make_model(model_settings):
     
     # model components:
     z = make_z(n_bins=model_settings['n_bins'], z_bin=model_settings['z_bin'])
-    drift = make_drift(n_bins=model_settings['n_bins'], v_bin=model_settings['v_bin'], dc_bin=model_settings['dc_bin'])
-    a = make_a(n_bins=model_settings['n_bins'], a_bin=model_settings['a_bin'], bound_collapse=model_settings['bound_collapse'])
+    drift = make_drift(n_bins=model_settings['n_bins'], v_bin=model_settings['v_bin'], b_bin=model_settings['b_bin'])
+    a = make_a(n_bins=model_settings['n_bins'], a_bin=model_settings['a_bin'], u_bin=model_settings['u_bin'], urgency=model_settings['urgency'])
     t = make_t(n_bins=model_settings['n_bins'], t_bin=model_settings['t_bin'])
+    T_dur = model_settings['T_dur']
 
     # limits:
     ranges = {
-            'z':(0.05,0.95),    # starting point
-            'v':(0,5),          # drift rate
-            'b':(-5,5),         # drift bias
-            'a':(0.1,5),        # bound
-            'c':(0.01,100),     # hyperbolic collapse
-            't':(0,2),          # non-decision time
+            'z':(0.05,0.95),               # starting point
+            'v':(0,5),                     # drift rate
+            'b':(-5,5),                    # drift bias
+            'a':(0.1,5),                   # bound
+            # 'u':(-T_dur*10,T_dur*10),    # hyperbolic collapse
+            'u':(0.01,T_dur*10),           # hyperbolic collapse
+            't':(0,2),                     # non-decision time
             }
 
     # put together:
@@ -166,15 +204,19 @@ def make_model(model_settings):
                 drift=drift(**{param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in drift.required_parameters}),
                 bound=a(**{param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in a.required_parameters}),
                 overlay=OverlayChain(overlays=[t(**{param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in t.required_parameters}),
-                                                OverlayPoissonMixture(pmixturecoef=.05, rate=1)]), # OverlayUniformMixture(umixturecoef=.01)
+                                                # OverlayUniformMixture(umixturecoef=.01)]),
+                                                OverlayPoissonMixture(pmixturecoef=.01, rate=1)]),
                 noise=NoiseConstant(noise=1),
-                dx=.005, dt=.01, T_dur=model_settings['T_dur'])
+                dx=.001, dt=.01, T_dur=T_dur)
     return model
 
-def fit_per_subject(df, model):
+def fit_model(df, model_settings):
+
+    # make model
+    model = make_model(model_settings=model_settings)
 
     # sample:
-    sample = Sample.from_pandas_dataframe(df=df, rt_column_name="rt", correct_column_name="response")
+    sample = Sample.from_pandas_dataframe(df=df, rt_column_name='rt', correct_column_name='response')
 
     # fit:
     fit_model = fit_adjust_model(sample=sample, model=model, lossfunction=LossBIC)
@@ -198,7 +240,10 @@ def simulate_data(df, params, model_settings, subj_idx, nr_trials=10000):
             ind = (params['subj_idx']==subj_idx)&(params['variable']==p[:-1])&(params['bin']==int(p[-1]))
         else:
             ind = (params['subj_idx']==subj_idx)&(params['variable']==p)
-        params_to_set.append(Fitted(params.loc[ind, 'value']))
+        try:
+            params_to_set.append(Fitted(params.loc[ind, 'value']))
+        except:
+            shell()
 
     # set:
     model.set_model_parameters(params_to_set)
@@ -222,7 +267,7 @@ def simulate_data(df, params, model_settings, subj_idx, nr_trials=10000):
             data['subj_idx'] = subj_idx
             data['stimulus'] = stim
             data['bin'] = b
-
+            
             # remove RTs smaller than non-decision time:
             ind = (params['subj_idx']==subj_idx)&(params['variable']=='t')&(params['bin']==b)
             if sum(ind) == 0:
