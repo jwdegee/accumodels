@@ -23,97 +23,129 @@ from IPython import embed as shell
 
 # set_N_cpus(16)
 
-def make_z(n_bins, z_bin=False):
-    if z_bin:
-       z_names = ['z{}'.format(i) for i in range(n_bins)]
+def get_param_names(sample, depends_on, param):
+
+    if depends_on is None:
+        unique_conditions = None
+        names = [param]
     else:
-        z_names = ['z']
+        unique_conditions = [np.unique(np.concatenate((np.unique(sample.conditions[depends_on[i]][0]), 
+                                        np.unique(sample.conditions[depends_on[i]][1])))) for i in range(len(depends_on))]
+        if len(unique_conditions) == 1:
+            names = ['{}{}'.format(param,i) for i in unique_conditions[0]]
+        elif len(unique_conditions) == 2:
+            names = ['{}{}.{}'.format(param,i,j) for i in unique_conditions[0] for j in unique_conditions[1]]
+
+    return names, unique_conditions
+
+def make_z(sample, z_depends_on=[None]):
+    
+    z_names, z_unique_conditions = get_param_names(sample=sample, depends_on=z_depends_on, param='z')
+
     class StartingPoint(InitialCondition):
         name = 'A starting point.'
         required_parameters = z_names
-        if z_bin:
-            required_conditions = ['bin']
+        if not z_depends_on is None:
+            required_conditions = z_depends_on.copy()
         def get_IC(self, x, dx, conditions):
             pdf = np.zeros(len(x))
-            if z_bin:
-                z_param = getattr(self, 'z{}'.format(conditions['bin']))
-            else:
+            if z_depends_on is None:
                 z_param = self.z
+            elif len(z_unique_conditions) == 1:
+                z_param = getattr(self, 'z{}'.format(conditions[z_depends_on[0]]))
+            elif len(z_unique_conditions) == 2:
+                z_param = getattr(self, 'z{}.{}'.format(conditions[z_depends_on[0]],conditions[z_depends_on[1]]))
             pdf[int(len(pdf)*z_param)] = 1
             return pdf
     return StartingPoint
 
-def make_drift(n_bins, v_bin=False, b_bin=False):
-    if v_bin:
-        v_names = ['v{}'.format(i) for i in range(n_bins)]
-    else:
-        v_names = ['v']
-    if b_bin:
-        b_names = ['b{}'.format(i) for i in range(n_bins)]
-    else:
-        b_names = ['b']
+def make_drift(sample, v_depends_on=[None], b_depends_on=[None]):
+    
+    v_names, v_unique_conditions = get_param_names(sample=sample, depends_on=v_depends_on, param='v')
+    b_names, b_unique_conditions = get_param_names(sample=sample, depends_on=b_depends_on, param='b')
+
     class DriftStimulusCoding(ddm.models.Drift):
         name = 'Drift'
         required_parameters = v_names + b_names
-        if v_bin or b_bin:
-            required_conditions = ['stimulus', 'bin']
-        else:
-            required_conditions = ['stimulus']
+        required_conditions = ['stimulus']
+        if (v_depends_on is not None):
+            required_conditions = list(set(required_conditions+v_depends_on))
+        if (b_depends_on is not None):
+            required_conditions = list(set(required_conditions+b_depends_on))
+
         def get_drift(self, conditions, **kwargs):
-            if v_bin:
-                v_param = getattr(self, 'v{}'.format(conditions['bin']))
-            else:
+            
+            # v param:
+            if v_depends_on is None:
                 v_param = self.v
-            if b_bin:
-                b_param = getattr(self, 'b{}'.format(conditions['bin']))
-            else:
+            elif len(v_unique_conditions) == 1:
+                v_param = getattr(self, 'v{}'.format(conditions[v_depends_on[0]]))
+            elif len(v_unique_conditions) == 2:
+                v_param = getattr(self, 'v{}.{}'.format(conditions[v_depends_on[0]],conditions[v_depends_on[1]]))
+
+            # b param:
+            if b_depends_on is None:
                 b_param = self.b
+            elif len(b_unique_conditions) == 1:
+                b_param = getattr(self, 'b{}'.format(conditions[b_depends_on[0]]))
+            elif len(b_unique_conditions) == 2:
+                b_param = getattr(self, 'b{}.{}'.format(conditions[b_depends_on[0]],conditions[b_depends_on[1]]))
+
             return b_param + (v_param * conditions['stimulus'])
     return DriftStimulusCoding
 
-def make_a(n_bins, a_bin=False, u_bin=False, urgency=False):
-    if a_bin:
-        a_names = ['a{}'.format(i) for i in range(n_bins)]
-    else:
-        a_names = ['a']
+def make_a(sample, urgency, a_depends_on=[None], u_depends_on=[None]):
+    
+    a_names, a_unique_conditions = get_param_names(sample=sample, depends_on=a_depends_on, param='a')
     if urgency:
-        if u_bin:
-            u_names = ['u{}'.format(i) for i in range(n_bins)]
-        else:
-            u_names = ['u']
+        u_names, u_unique_conditions = get_param_names(sample=sample, depends_on=u_depends_on, param='u') 
     else:
         u_names = []
-
+    
     class BoundCollapsingHyperbolic(Bound):
         name = 'Hyperbolic collapsing bounds'
         required_parameters = a_names + u_names
-        if a_bin or u_bin:
-            required_conditions = ['bin']
+        
+        required_conditions = []
+        if (a_depends_on is not None):
+            required_conditions = list(set(required_conditions+a_depends_on))
+        if (u_depends_on is not None):
+            required_conditions = list(set(required_conditions+u_depends_on))
+        
         def get_bound(self, t, conditions, **kwargs):
-            if a_bin:
-                a_param = getattr(self, 'a{}'.format(conditions['bin']))
-            else:
+            
+            # a param:
+            if a_depends_on is None:
                 a_param = self.a
+            elif len(a_unique_conditions) == 1:
+                a_param = getattr(self, 'a{}'.format(conditions[a_depends_on[0]]))
+            elif len(a_unique_conditions) == 2:
+                a_param = getattr(self, 'a{}.{}'.format(conditions[a_depends_on[0]],conditions[a_depends_on[1]]))
+            
             if urgency:
-                if u_bin:
-                    u_param = getattr(self, 'u{}'.format(conditions['bin']))
-                else:
+                # u param:
+                if u_depends_on is None:
                     u_param = self.u
+                elif len(u_unique_conditions) == 1:
+                    u_param = getattr(self, 'u{}'.format(conditions[u_depends_on[0]]))
+                elif len(u_unique_conditions) == 2:
+                    u_param = getattr(self, 'u{}.{}'.format(conditions[u_depends_on[0]],conditions[u_depends_on[1]]))
+                
+            # return:
                 return a_param-(a_param*(t/(t+u_param)))
             else:
                 return a_param
     return BoundCollapsingHyperbolic
 
-def make_t(n_bins, t_bin=False):
-    if t_bin:
-       t_names = ['t{}'.format(i) for i in range(n_bins)]
-    else:
-        t_names = ['t']
+def make_t(sample, t_depends_on=[None]):
+    
+    t_names, t_unique_conditions = get_param_names(sample=sample, depends_on=t_depends_on, param='t')
+    
     class NonDecisionTime(Overlay):
         name = 'Non-decision time'
         required_parameters = t_names
-        if t_bin:
-            required_conditions = ['bin']
+        if not t_depends_on is None:
+            required_conditions = t_depends_on.copy()
         def apply(self, solution):
             # Unpack solution object
             corr = solution.corr
@@ -121,11 +153,15 @@ def make_t(n_bins, t_bin=False):
             m = solution.model
             cond = solution.conditions
             undec = solution.undec
-            # Compute non-decision time
-            if t_bin:
-                t_param = getattr(self, 't{}'.format(cond['bin']))
-            else:
+            
+            # t param:
+            if t_depends_on is None:
                 t_param = self.t
+            elif len(t_unique_conditions) == 1:
+                t_param = getattr(self, 't{}'.format(cond[t_depends_on[0]]))
+            elif len(t_unique_conditions) == 2:
+                t_param = getattr(self, 't{}.{}'.format(cond[t_depends_on[0]],cond[t_depends_on[1]]))
+            
             shifts = int(t_param/m.dt) # truncate
             # Shift the distribution
             newcorr = np.zeros(corr.shape, dtype=corr.dtype)
@@ -143,48 +179,55 @@ def make_t(n_bins, t_bin=False):
     return NonDecisionTime
 
 
-def make_z_reg():
-    class StartingPoint(InitialCondition):
-        name = 'A starting point.'
-        required_parameters = ['z', 'z_coeff']
-        required_conditions = ['physio']
-        def get_IC(self, x, dx, conditions):
-            pdf = np.zeros(len(x))
-            z_param = self.z + (self.z_coeff * conditions['physio'])
-            pdf[int(len(pdf)*z_param)] = 1
-            return pdf
-    return StartingPoint
+# def make_z_reg():
+#     class StartingPoint(InitialCondition):
+#         name = 'A starting point.'
+#         required_parameters = ['z', 'z_coeff']
+#         required_conditions = ['physio']
+#         def get_IC(self, x, dx, conditions):
+#             pdf = np.zeros(len(x))
+#             z_param = self.z + (self.z_coeff * conditions['physio'])
+#             pdf[int(len(pdf)*z_param)] = 1
+#             return pdf
+#     return StartingPoint
 
 
-def make_drift_regression(v_reg=True, b_reg=True):
-    if v_reg:
-        v_names = ['v', 'v_coeff']
-    else:
-        v_names = ['v']
-    if b_bin:
-        b_names = ['b', 'b_coeff']
-    else:
-        b_names = ['b']
-    class DriftStimulusCoding(ddm.models.Drift):
-        name = 'Drift'
-        required_parameters = v_names + b_names
-        required_conditions = ['stimulus', 'physio']
-        def get_drift(self, conditions, **kwargs):
-            if v_reg and not b_reg:
-                return self.b + (self.v * conditions['stimulus']) + (self.v_coeff * conditions['stimulus'] * conditions['physio'])
-            elif b_reg and not v_reg:
-                return self.b + (self.v * conditions['stimulus']) + (self.b_coeff * conditions['physio'])
-            elif v_reg and b_reg:
-                return self.b + (self.v * conditions['stimulus']) + (self.v_coeff * conditions['stimulus'] * conditions['physio']) + (self.b_coeff * conditions['physio'])
-    return DriftStimulusCoding
+# def make_drift_regression(v_reg=True, b_reg=True):
+#     if v_reg:
+#         v_names = ['v', 'v_coeff']
+#     else:
+#         v_names = ['v']
+#     if b_bin:
+#         b_names = ['b', 'b_coeff']
+#     else:
+#         b_names = ['b']
+#     class DriftStimulusCoding(ddm.models.Drift):
+#         name = 'Drift'
+#         required_parameters = v_names + b_names
+#         required_conditions = ['stimulus', 'physio']
+#         def get_drift(self, conditions, **kwargs):
+#             if v_reg and not b_reg:
+#                 return self.b + (self.v * conditions['stimulus']) + (self.v_coeff * conditions['stimulus'] * conditions['physio'])
+#             elif b_reg and not v_reg:
+#                 return self.b + (self.v * conditions['stimulus']) + (self.b_coeff * conditions['physio'])
+#             elif v_reg and b_reg:
+#                 return self.b + (self.v * conditions['stimulus']) + (self.v_coeff * conditions['stimulus'] * conditions['physio']) + (self.b_coeff * conditions['physio'])
+#     return DriftStimulusCoding
 
-def make_model(model_settings):
+def make_model(sample, model_settings):
     
     # model components:
-    z = make_z(n_bins=model_settings['n_bins'], z_bin=model_settings['z_bin'])
-    drift = make_drift(n_bins=model_settings['n_bins'], v_bin=model_settings['v_bin'], b_bin=model_settings['b_bin'])
-    a = make_a(n_bins=model_settings['n_bins'], a_bin=model_settings['a_bin'], u_bin=model_settings['u_bin'], urgency=model_settings['urgency'])
-    t = make_t(n_bins=model_settings['n_bins'], t_bin=model_settings['t_bin'])
+    z = make_z(sample=sample, 
+                z_depends_on=model_settings['depends_on']['z'])
+    drift = make_drift(sample=sample, 
+                        v_depends_on=model_settings['depends_on']['v'], 
+                        b_depends_on=model_settings['depends_on']['b'])
+    a = make_a(sample=sample, 
+                urgency=model_settings['urgency'], 
+                a_depends_on=model_settings['depends_on']['a'], 
+                u_depends_on=model_settings['depends_on']['u'])
+    t = make_t(sample=sample, 
+                t_depends_on=model_settings['depends_on']['t'])
     T_dur = model_settings['T_dur']
 
     # limits:
@@ -212,13 +255,14 @@ def make_model(model_settings):
 
 def fit_model(df, model_settings):
 
-    # make model
-    model = make_model(model_settings=model_settings)
-
     # sample:
     sample = Sample.from_pandas_dataframe(df=df, rt_column_name='rt', correct_column_name='response')
 
+    # make model
+    model = make_model(sample=sample, model_settings=model_settings)
+    
     # fit:
+    # fit_model = fit_adjust_model(sample=sample, model=model, lossfunction=LossBIC, fitparams={'maxiter':5000})
     fit_model = fit_adjust_model(sample=sample, model=model, lossfunction=LossBIC)
 
     return fit_model
@@ -227,7 +271,7 @@ def simulate_data(df, params, model_settings, subj_idx, nr_trials=10000):
 
     # make model
     model = make_model(model_settings=model_settings)
-    
+
     # get param names:
     param_names = []
     for component in model.dependencies: 
