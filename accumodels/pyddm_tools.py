@@ -247,13 +247,13 @@ def make_model(sample, model_settings):
                 drift=drift(**{param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in drift.required_parameters}),
                 bound=a(**{param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in a.required_parameters}),
                 overlay=OverlayChain(overlays=[t(**{param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in t.required_parameters}),
-                                                # OverlayUniformMixture(umixturecoef=.01)]),
-                                                OverlayPoissonMixture(pmixturecoef=.01, rate=1)]),
+                                                OverlayUniformMixture(umixturecoef=0)]),
+                                                # OverlayPoissonMixture(pmixturecoef=.01, rate=1)]),
                 noise=NoiseConstant(noise=1),
-                dx=.001, dt=.01, T_dur=T_dur)
+                dx=.005, dt=.01, T_dur=T_dur)
     return model
 
-def fit_model(df, model_settings):
+def fit_model(df, model_settings, subj_idx):
 
     # sample:
     sample = Sample.from_pandas_dataframe(df=df, rt_column_name='rt', correct_column_name='response')
@@ -262,64 +262,72 @@ def fit_model(df, model_settings):
     model = make_model(sample=sample, model_settings=model_settings)
     
     # fit:
-    # fit_model = fit_adjust_model(sample=sample, model=model, lossfunction=LossBIC, fitparams={'maxiter':5000})
-    fit_model = fit_adjust_model(sample=sample, model=model, lossfunction=LossBIC)
+    # model = fit_adjust_model(sample=sample, model=model, lossfunction=LossBIC, fitparams={'maxiter':5000})
+    model = fit_adjust_model(sample=sample, model=model, lossfunction=LossBIC)
 
-    return fit_model
+    # get params:
+    param_names = [component.required_parameters for component in model.dependencies]
+    param_names = [item for sublist in param_names for item in sublist]
+    params = pd.DataFrame(np.atleast_2d([p.real for p in model.get_model_parameters()]), columns=param_names)
+    params['bic'] = model.fitresult.value() 
+    params['subj_idx'] = subj_idx
+
+    return params
 
 def simulate_data(df, params, model_settings, subj_idx, nr_trials=10000):
 
-    # make model
-    model = make_model(model_settings=model_settings)
+    # sample:
+    sample = Sample.from_pandas_dataframe(df=df, rt_column_name='rt', correct_column_name='response')
 
-    # get param names:
-    param_names = []
-    for component in model.dependencies: 
-        param_names = param_names + component.required_parameters
-    
-    # make list:
-    params_to_set = []
-    for p in param_names:
-        if p[-1].isnumeric():
-            ind = (params['subj_idx']==subj_idx)&(params['variable']==p[:-1])&(params['bin']==int(p[-1]))
-        else:
-            ind = (params['subj_idx']==subj_idx)&(params['variable']==p)
-        try:
-            params_to_set.append(Fitted(params.loc[ind, 'value']))
-        except:
-            shell()
+    # make model:
+    model = make_model(sample=sample, model_settings=model_settings)
 
-    # set:
+    # remove laps rate:
+    params['pmixturecoef'] = 0
+    # params['rate'] = 1
+
+    # set fitted parameters:
+    param_names = [component.required_parameters for component in model.dependencies]
+    param_names = [item for sublist in param_names for item in sublist]
+    params_to_set = [Fitted(params.loc[(params['subj_idx']==subj_idx), param]) for param in param_names]
     model.set_model_parameters(params_to_set)
     
     # compute number of trials to generate:
-    trial_nrs = (df.loc[df['subj_idx']==subj_idx,:].groupby(['stimulus', 'bin']).count()['rt'] / 
-                    sum(df.loc[df['subj_idx']==subj_idx,:].groupby(['stimulus', 'bin']).count()['rt']) * nr_trials).astype(int).reset_index()
+    df.loc[:,'trials'] = 1
+    trial_nrs = df.groupby(model.required_conditions).count()['trials']
+    trial_nrs = (trial_nrs / sum(trial_nrs) * nr_trials).reset_index()
+    trial_nrs['trials'] = trial_nrs['trials'].astype(int)
 
     # generate:
     data_subj = []
-    for stim in [-1,1]:
-        for b in range(model_settings['n_bins']):
-            if model_settings['n_bins'] > 1:
-                samp = model.solve({'stimulus':stim, 'bin':b}).resample(int(trial_nrs.query('(stimulus=={})&(bin=={})'.format(stim, b))['rt']))
-            else:
-                samp = model.solve({'stimulus':stim}).resample(trial_nrs.query('(stimulus=={})'.format(stim))['rt'])
-            data = pd.DataFrame({
-                'rt': np.concatenate((samp.corr, samp.err)),
-                'response': np.concatenate((np.ones(len(samp.corr)), np.zeros(len(samp.err))))
-                })
-            data['subj_idx'] = subj_idx
-            data['stimulus'] = stim
-            data['bin'] = b
-            
-            # remove RTs smaller than non-decision time:
-            ind = (params['subj_idx']==subj_idx)&(params['variable']=='t')&(params['bin']==b)
-            if sum(ind) == 0:
-                ind = (params['subj_idx']==subj_idx)&(params['variable']=='t')
-            data = data.loc[data['rt']>float(params.loc[ind, 'value']),:].reset_index()
+    for ids, d in trial_nrs.groupby(model.required_conditions):
+        
+        if len(ids) == 3:    
+            t = 't{}'.format(ids[1], ids[2])
+        elif len(ids) == 2:
+            t = 't{}'.format(ids[1])
+        else:
+            t = 't'
 
-            # append:
-            data_subj.append(data)
+        # generate data:
+        samp = model.solve({key:value for value, key in zip(ids, model.required_conditions)}).resample(int(d['trials']))
+
+        # to dataframe:
+        data = pd.DataFrame({
+            'rt': np.concatenate((samp.corr, samp.err)),
+            'response': np.concatenate((np.ones(len(samp.corr)), np.zeros(len(samp.err))))
+            })
+        data['subj_idx'] = subj_idx
+        for value, key in zip(ids, model.required_conditions):
+            data[key] = value
+        
+        # remove RTs smaller than non-decision time:
+        # non_decision_time = params.loc[(params['subj_idx']==subj_idx), t]
+        non_decision_time = 0
+        data = data.loc[data['rt']>non_decision_time,:].reset_index()
+
+        # append:
+        data_subj.append(data)
     data_subj = pd.concat(data_subj).reset_index(drop=True)
 
     # add correct column:
