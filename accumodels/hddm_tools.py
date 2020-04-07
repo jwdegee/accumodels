@@ -19,16 +19,48 @@ def fit_ddm_per_group(data, model, model_dir, model_name, samples=5000, burn=100
     
     res = Parallel(n_jobs=n_jobs)(delayed(fit_ddm_hierarchical)(data, model, model_dir, model_name, samples, burn, thin, model_id) for model_id in range(n_models))
 
-def fit_ddm_hierarchical(data, model, model_dir, model_name, samples=5000, burn=1000, thin=1, model_id=0):
+def fit_ddm_hierarchical(df, model_settings, model_dir, model_name, samples=5000, burn=1000, thin=1, model_id=0):
     
-    import hddm
-    import os
-    exec('m = {}'.format(model), locals(), globals())
+    # fix depends_on:
+    depends_on = model_settings['depends_on']
+    if depends_on is not None:
+        if 'dc' in depends_on:
+            depends_on['dc'] = depends_on['b']
+        depends_on.pop('b', None)
+        depends_on.pop('u', None)
+
+    # fit:
+    m = hddm.HDDMStimCoding(df, stim_col='stimulus', split_param='v', drift_criterion=True, bias=True, 
+                            depends_on=depends_on, include=('sv'), group_only_nodes=['sv'], p_outlier=0)
     m.find_starting_values()
     m.sample(samples, burn=burn, thin=thin, dbname=os.path.join(model_dir, '{}_{}.db'.format(model_name, model_id)), db='pickle')
     m.save(os.path.join(model_dir, '{}_{}.hddm'.format(model_name, model_id)))
     
-    return m
+    # params:    
+    params = m.gen_stats()['mean'].reset_index()
+    params.columns = ['variable', 'value']
+    params = params.loc[['subj' in p for p in params['variable']],:]
+    params['subj_idx'] = [p.split('.')[-1] for p in params['variable']]
+    params['subj_idx'] = params['subj_idx'].astype(int)
+    params['variable'] = [p.replace('_subj', '') for p in params['variable']]
+    params['variable'] = [p.replace('(', '') for p in params['variable']]
+    params['variable'] = [p.replace(')', '') for p in params['variable']]
+    params['variable'] = [p.split('.')[0] for p in params['variable']]
+    params = params.pivot(index='subj_idx', columns='variable')
+    params.columns = params.columns.droplevel(level=0)
+    params.columns.name = None
+    params = params.reset_index()
+    params = params.sort_values(by=['subj_idx'])
+    
+    # fix columns:
+    params.columns = [p if not 'dc' else p.replace('dc', 'b') for p in params.columns]
+
+    # fix values:
+    params.loc[:, [p[0]=='a' for p in params.columns]] = params.loc[:, [p[0]=='a' for p in params.columns]] / 2 
+    params['noise'] = 1
+    params['umixturecoef'] = 0
+
+    return params
 
 def load_ddm_per_group(model_dir, model_name, n_models=3):
     

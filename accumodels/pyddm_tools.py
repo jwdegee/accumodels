@@ -59,10 +59,13 @@ def make_z(sample, z_depends_on=[None]):
             return pdf
     return StartingPoint
 
-def make_drift(sample, v_depends_on=[None], b_depends_on=[None]):
+def make_drift(sample, drift_bias, v_depends_on=[None], b_depends_on=[None]):
     
     v_names, v_unique_conditions = get_param_names(sample=sample, depends_on=v_depends_on, param='v')
-    b_names, b_unique_conditions = get_param_names(sample=sample, depends_on=b_depends_on, param='b')
+    if drift_bias:
+        b_names, b_unique_conditions = get_param_names(sample=sample, depends_on=b_depends_on, param='b')
+    else:
+        b_names = []
 
     class DriftStimulusCoding(ddm.models.Drift):
         name = 'Drift'
@@ -83,15 +86,19 @@ def make_drift(sample, v_depends_on=[None], b_depends_on=[None]):
             elif len(v_unique_conditions) == 2:
                 v_param = getattr(self, 'v{}.{}'.format(conditions[v_depends_on[0]],conditions[v_depends_on[1]]))
 
-            # b param:
-            if b_depends_on is None:
-                b_param = self.b
-            elif len(b_unique_conditions) == 1:
-                b_param = getattr(self, 'b{}'.format(conditions[b_depends_on[0]]))
-            elif len(b_unique_conditions) == 2:
-                b_param = getattr(self, 'b{}.{}'.format(conditions[b_depends_on[0]],conditions[b_depends_on[1]]))
-
-            return b_param + (v_param * conditions['stimulus'])
+            if drift_bias:
+                # b param:
+                if b_depends_on is None:
+                    b_param = self.b
+                elif len(b_unique_conditions) == 1:
+                    b_param = getattr(self, 'b{}'.format(conditions[b_depends_on[0]]))
+                elif len(b_unique_conditions) == 2:
+                    b_param = getattr(self, 'b{}.{}'.format(conditions[b_depends_on[0]],conditions[b_depends_on[1]]))
+            
+            # return:
+                return b_param + (v_param * conditions['stimulus'])
+            else:
+                return (v_param * conditions['stimulus'])
     return DriftStimulusCoding
 
 def make_a(sample, urgency, a_depends_on=[None], u_depends_on=[None]):
@@ -220,6 +227,7 @@ def make_model(sample, model_settings):
     z = make_z(sample=sample, 
                 z_depends_on=model_settings['depends_on']['z'])
     drift = make_drift(sample=sample, 
+                        drift_bias=model_settings['drift_bias'], 
                         v_depends_on=model_settings['depends_on']['v'], 
                         b_depends_on=model_settings['depends_on']['b'])
     a = make_a(sample=sample, 
@@ -242,8 +250,12 @@ def make_model(sample, model_settings):
             }
 
     # put together:
+    if model_settings['start_bias']:
+        initial_condition = z(**{param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in z.required_parameters})
+    else:
+        initial_condition = z(**{'z':0.5})
     model = Model(name='stimulus coding model / collapsing bound',
-                IC=z(**{param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in z.required_parameters}),
+                IC=initial_condition,
                 drift=drift(**{param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in drift.required_parameters}),
                 bound=a(**{param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in a.required_parameters}),
                 overlay=OverlayChain(overlays=[t(**{param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in t.required_parameters}),
@@ -283,8 +295,9 @@ def simulate_data(df, params, model_settings, subj_idx, nr_trials=10000):
     model = make_model(sample=sample, model_settings=model_settings)
 
     # remove laps rate:
+    params['umixturecoef'] = 0
     params['pmixturecoef'] = 0
-    # params['rate'] = 1
+    params['rate'] = 1
 
     # set fitted parameters:
     param_names = [component.required_parameters for component in model.dependencies]

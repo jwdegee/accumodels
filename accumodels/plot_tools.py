@@ -218,10 +218,12 @@ def summary_plot(df, quantiles, mean_correct, mean_response, xlim=None):
 
     return fig
 
-def conditional_response_plot(df, quantiles, mean_response, xlim=[0.1,0.6], cmap="Blues"):
+def conditional_response_plot(df, quantiles, mean_response, y='response', xlim=[0.1,0.6], ylim=[0.4,0.9], cmap="Blues"):
     
-    fig = plt.figure(figsize=(2,2))
+
+    fig = plt.figure(figsize=(1.5,1.5))
     ax = fig.add_subplot(1,1,1)
+    
     plt.axhline(mean_response, xmin=xlim[0]-0.1, xmax=xlim[1]+0.1, lw=0.5, color='k')
     df.loc[:,'rt_bin'] = pd.qcut(df['rt'], quantiles, labels=False)
     d = df.groupby(['subj_idx', 'rt_bin']).mean().reset_index()
@@ -231,17 +233,19 @@ def conditional_response_plot(df, quantiles, mean_response, xlim=[0.1,0.6], cmap
 
     colors = sns.color_palette(cmap, len(np.unique(df['subj_idx'])))
     for s, c in zip(np.unique(d["subj_idx"]), colors):
-        ax.errorbar(d.loc[d["subj_idx"]==s, "rt"], d.loc[d["subj_idx"]==s, "response"], fmt='-o', color=c, markersize=5)
-    if xlim:
+        ax.errorbar(d.loc[d["subj_idx"]==s, "rt"], d.loc[d["subj_idx"]==s, y], fmt='-o', color=c, markersize=5)
+    if xlim is not None:
         ax.set_xlim(xlim)
-    ax.set_ylim(0.4,1)
-    ax.set_title('P(correct) = {}\nP(bias) = {}'.format(
-                                                    round(df.loc[:, 'correct'].mean(), 2),
-                                                    round(df.loc[:, 'response'].mean(), 2),
-                                                    ))
+    if ylim is not None:
+        ax.set_ylim(ylim)
+    
+    means = df.groupby(['subj_idx']).mean()
+    means = [round(m,2) for m in means['correct']] + [round(m,2) for m in means['response']]
+
+    ax.set_title('P(corr.)={}, {}, {}\nP(bias)={}, {}, {}'.format(*means))
     ax.set_xlabel('RT (s)')
-    ax.set_ylabel('P(bias)')
-    sns.despine(trim=True, offset=5)
+    ax.set_ylabel('P({})'.format(y))
+    sns.despine(trim=True, offset=2)
     plt.tight_layout()
     
     return fig
