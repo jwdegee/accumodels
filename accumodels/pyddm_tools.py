@@ -289,6 +289,12 @@ def fit_model(df, model_settings, subj_idx):
 def simulate_data(df, params, model_settings, subj_idx, nr_trials=10000):
 
     # sample:
+    if np.mean(np.isnan(df.loc[df['response']==0,'rt']))==1:
+        df['rt'] = np.random.rand(df.shape[0])
+        gonogo = True
+        print('gonogo data!')
+    else:
+        gonogo = False
     sample = Sample.from_pandas_dataframe(df=df, rt_column_name='rt', correct_column_name='response')
 
     # make model:
@@ -310,10 +316,13 @@ def simulate_data(df, params, model_settings, subj_idx, nr_trials=10000):
     trial_nrs = df.groupby(model.required_conditions).count()['trials']
     trial_nrs = (trial_nrs / sum(trial_nrs) * nr_trials).reset_index()
     trial_nrs['trials'] = trial_nrs['trials'].astype(int)
-
+    
     # generate:
     data_subj = []
     for ids, d in trial_nrs.groupby(model.required_conditions):
+        
+        if isinstance(ids, int):
+            ids = [ids]
         
         if len(ids) == 3:    
             t = 't{}'.format(ids[1], ids[2])
@@ -348,4 +357,8 @@ def simulate_data(df, params, model_settings, subj_idx, nr_trials=10000):
     data_subj.loc[(data_subj['stimulus']==1)&(data_subj['response']==1), 'correct'] = 1
     data_subj.loc[(data_subj['stimulus']==-1)&(data_subj['response']==0), 'correct'] = 1
     
+    # gonogo data?
+    if gonogo:
+        data_subj.loc[data_subj['response']==0, 'rt'] = np.nan
+
     return data_subj

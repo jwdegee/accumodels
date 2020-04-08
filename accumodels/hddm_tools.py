@@ -15,45 +15,102 @@ from joblib import Memory
 from joblib import Parallel, delayed
 from IPython import embed as shell
 
-def fit_ddm_per_group(data, model, model_dir, model_name, samples=5000, burn=1000, thin=1, n_models=3, n_jobs=12):
-    
-    res = Parallel(n_jobs=n_jobs)(delayed(fit_ddm_hierarchical)(data, model, model_dir, model_name, samples, burn, thin, model_id) for model_id in range(n_models))
-
-def fit_ddm_hierarchical(df, model_settings, model_dir, model_name, samples=5000, burn=1000, thin=1, model_id=0):
+def fit_ddm(df, model_settings, model_dir, model_name, subj_idx=None, samples=5000, burn=1000, thin=1, model_id=0, n_runs=5):
     
     # fix depends_on:
     depends_on = model_settings['depends_on']
     if depends_on is not None:
-        if 'dc' in depends_on:
+        if 'b' in depends_on:
             depends_on['dc'] = depends_on['b']
         depends_on.pop('b', None)
         depends_on.pop('u', None)
+        depends_on = {k: v for k, v in depends_on.items() if v is not None}
 
-    # fit:
-    m = hddm.HDDMStimCoding(df, stim_col='stimulus', split_param='v', drift_criterion=True, bias=True, 
-                            depends_on=depends_on, include=('sv'), group_only_nodes=['sv'], p_outlier=0)
-    m.find_starting_values()
-    m.sample(samples, burn=burn, thin=thin, dbname=os.path.join(model_dir, '{}_{}.db'.format(model_name, model_id)), db='pickle')
-    m.save(os.path.join(model_dir, '{}_{}.hddm'.format(model_name, model_id)))
-    
-    # params:    
-    params = m.gen_stats()['mean'].reset_index()
-    params.columns = ['variable', 'value']
-    params = params.loc[['subj' in p for p in params['variable']],:]
-    params['subj_idx'] = [p.split('.')[-1] for p in params['variable']]
-    params['subj_idx'] = params['subj_idx'].astype(int)
-    params['variable'] = [p.replace('_subj', '') for p in params['variable']]
-    params['variable'] = [p.replace('(', '') for p in params['variable']]
-    params['variable'] = [p.replace(')', '') for p in params['variable']]
-    params['variable'] = [p.split('.')[0] for p in params['variable']]
-    params = params.pivot(index='subj_idx', columns='variable')
-    params.columns = params.columns.droplevel(level=0)
-    params.columns.name = None
-    params = params.reset_index()
-    params = params.sort_values(by=['subj_idx'])
-    
+    if model_settings['fit'] == 'hddm':
+        
+        m = hddm.HDDMStimCoding(df, stim_col='stimulus', split_param='v', drift_criterion=True, bias=True, 
+                                # depends_on=depends_on, include=('sv'), group_only_nodes=['sv'], p_outlier=0)
+                                depends_on=depends_on, p_outlier=0)
+
+        # fit:
+        m.find_starting_values()
+        m.sample(samples, burn=burn, thin=thin, dbname=os.path.join(model_dir, '{}_{}.db'.format(model_name, model_id)), db='pickle')
+        m.save(os.path.join(model_dir, '{}_{}.hddm'.format(model_name, model_id)))
+
+        # params:    
+        params = m.gen_stats()['mean'].reset_index()
+        params.columns = ['variable', 'value']
+        params = params.loc[['subj' in p for p in params['variable']],:]
+        params['subj_idx'] = [p.split('.')[-1] for p in params['variable']]
+        params['subj_idx'] = params['subj_idx'].astype(int)
+        params['variable'] = [p.replace('_subj', '') for p in params['variable']]
+        params['variable'] = [p.replace('(', '') for p in params['variable']]
+        params['variable'] = [p.replace(')', '') for p in params['variable']]
+        params['variable'] = [p.split('.')[0] for p in params['variable']]
+        params = params.pivot(index='subj_idx', columns='variable')
+        params.columns = params.columns.droplevel(level=0)
+        params.columns.name = None
+        params = params.reset_index()
+        params = params.sort_values(by=['subj_idx'])
+
+
+    elif model_settings['fit'] == 'hddm_q':
+        
+        # quantiles=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+        quantiles=[0.1, 0.3, 0.5, 0.7, 0.9]
+        m = hddm.HDDMStimCoding(df, stim_col='stimulus', split_param='v', drift_criterion=True, bias=True, 
+                                # depends_on=depends_on, include=('sv'), group_only_nodes=['sv'], p_outlier=0)
+                                depends_on=depends_on, p_outlier=0)
+        
+        # starting values:
+        if sum(np.isnan(df.loc[df['response']==0, 'rt'])) == sum(df['response']==0):
+            # pass
+            print('finding starting values via basic model!')
+            basic_m = hddm.HDDMStimCoding(df, stim_col='stimulus', split_param='v', drift_criterion=True, bias=True, p_outlier=0)
+            # basic_m = hddm.HDDMStimCoding(df, stim_col='stimulus', split_param='v', drift_criterion=False, bias=False, p_outlier=0)
+            basic_m.optimize('chisquare', quantiles=quantiles, n_runs=n_runs)
+            values_m = m.values
+            
+            names = []
+            best_values = []
+            for v in ['v', 'a', 't', 'dc', 'z_trans', 'z',]:
+            # for v in ['v', 'a', 't', 'z_trans', 'z',]:
+            # for v in ['v', 'a', 't']:
+                values_to_set = []
+                for p in m.values:
+                    if '{}'.format(v) == p:
+                        values_to_set.append(p)
+                    elif '{}('.format(v) in p:
+                        values_to_set.append(p)
+                for p in values_to_set:
+                    try:
+                        values_m[p] = basic_m.values['{}'.format(v)]
+                        names.append(p)
+                        best_values.append( basic_m.values['{}'.format(v)])
+                    except:
+                        pass
+            try:
+                m.set_values(dict(list(zip(names, best_values))))
+            except:
+                pass
+        else:
+            m.approximate_map()
+        print(m.values)
+
+        # fit:
+        # m.map()
+        # print(m.values)
+        m.optimize('gsquare', quantiles=quantiles, n_runs=n_runs)
+
+        # params:
+        params = pd.concat((pd.DataFrame([m.values]), pd.DataFrame([m.bic_info])), axis=1) 
+        params['subj_idx'] = subj_idx
+        params.columns = [p.replace('(', '') for p in params.columns]
+        params.columns = [p.replace(')', '') for p in params.columns]
+
     # fix columns:
     params.columns = [p if not 'dc' else p.replace('dc', 'b') for p in params.columns]
+    params = params.loc[:, [p is not 'z_trans' for p in params.columns]]
 
     # fix values:
     params.loc[:, [p[0]=='a' for p in params.columns]] = params.loc[:, [p[0]=='a' for p in params.columns]] / 2 
@@ -68,58 +125,52 @@ def load_ddm_per_group(model_dir, model_name, n_models=3):
     
     return models
 
-def fit_ddm_per_subject(data, analysis_info, model, model_dir, model_name, n_runs=5, n_jobs=12):
+def fit_ddm_subject(df, model_settings, subj_idx, n_runs=5):
+    
+    # fix depends_on:
+    depends_on = model_settings['depends_on']
+    if depends_on is not None:
+        if 'dc' in depends_on:
+            depends_on['dc'] = depends_on['b']
+        depends_on.pop('b', None)
+        depends_on.pop('u', None)
 
-    res = Parallel(n_jobs=n_jobs)(delayed(fit_ddm_subject)(subj_data, analysis_info, subj_idx, model, model_dir, model_name, n_runs) for subj_idx, subj_data in data.groupby('subj_idx'))
-    
-    # # serial:
-    # res = []
-    # for subj_idx, subj_data in df.groupby('subj_idx'):
-    #     res.append( fit_ddm_subject(subj_data, subj_idx, model, model_dir, model_name, n_runs) )
-    
-    res = pd.concat(res, axis=0)
-    res.to_csv(os.path.join(model_dir, '{}_params_flat.csv'.format(model_name)))
-    return res
-    
-def fit_ddm_subject(data, analysis_info, subj_idx, model, model_dir, model_name, n_runs=5):
-    
-    import hddm
-    import pandas as pd
-    data = data.loc[data["subj_idx"]==subj_idx,:]
-    exec('m = {}'.format(model), locals(), globals())
+    # fit:
+    m = hddm.HDDMStimCoding(df, stim_col='stimulus', split_param='v', drift_criterion=True, bias=True, 
+                            depends_on=depends_on, include=('sv'), group_only_nodes=['sv'], p_outlier=0)
 
-    # starting values:
-    if sum(np.isnan(data.loc[data['response']==0, 'rt'])) == sum(data['response']==0):
-        # pass
-        print('finding starting values via basic model!')
-        basic_m = hddm.HDDMStimCoding(data, stim_col='stimulus', split_param='v', drift_criterion=False, bias=False, p_outlier=0)
-        basic_m.approximate_map()
-        basic_m.optimize('gsquare', quantiles=analysis_info['quantiles'], n_runs=n_runs)
-        values_m = m.values
+    # # starting values:
+    # if sum(np.isnan(data.loc[data['response']==0, 'rt'])) == sum(data['response']==0):
+    #     # pass
+    #     print('finding starting values via basic model!')
+    #     basic_m = hddm.HDDMStimCoding(data, stim_col='stimulus', split_param='v', drift_criterion=False, bias=False, p_outlier=0)
+    #     basic_m.approximate_map()
+    #     basic_m.optimize('gsquare', quantiles=analysis_info['quantiles'], n_runs=n_runs)
+    #     values_m = m.values
         
-        # for v in ['v', 'a', 't', 'z', 'z_trans', 'dc']:
-        names = []
-        best_values = []
-        for v in ['v', 'a', 't',]:
-            values_to_set = []
-            for p in m.values:
-                if '{}'.format(v) == p:
-                    values_to_set.append(p)
-                elif '{}('.format(v) in p:
-                    values_to_set.append(p)
-            for p in values_to_set:
-                try:
-                    values_m[p] = basic_m.values['{}'.format(v)]
-                    names.append(p)
-                    best_values.append( basic_m.values['{}'.format(v)])
-                except:
-                    pass
-        m.set_values(dict(list(zip(names, best_values))))
-        print(m.values)
-    else:
-        print('finding starting values!')
-        m.approximate_map()
-        print(m.values)
+    #     # for v in ['v', 'a', 't', 'z', 'z_trans', 'dc']:
+    #     names = []
+    #     best_values = []
+    #     for v in ['v', 'a', 't',]:
+    #         values_to_set = []
+    #         for p in m.values:
+    #             if '{}'.format(v) == p:
+    #                 values_to_set.append(p)
+    #             elif '{}('.format(v) in p:
+    #                 values_to_set.append(p)
+    #         for p in values_to_set:
+    #             try:
+    #                 values_m[p] = basic_m.values['{}'.format(v)]
+    #                 names.append(p)
+    #                 best_values.append( basic_m.values['{}'.format(v)])
+    #             except:
+    #                 pass
+    #     m.set_values(dict(list(zip(names, best_values))))
+    #     print(m.values)
+    # else:
+    #     print('finding starting values!')
+    #     m.approximate_map()
+    #     print(m.values)
     
     # optimize:
     print('fitting model!')
@@ -130,47 +181,116 @@ def fit_ddm_subject(data, analysis_info, subj_idx, model, model_dir, model_name,
 
     return res
 
-def load_ddm_per_subject(model_dir, model_name):
+
+
+# def fit_ddm_per_group(data, model, model_dir, model_name, samples=5000, burn=1000, thin=1, n_models=3, n_jobs=12):
     
-    return pd.read_csv(os.path.join(model_dir, '{}_params_flat.csv'.format(model_name))).drop('Unnamed: 0', 1)
+#     res = Parallel(n_jobs=n_jobs)(delayed(fit_ddm_hierarchical)(data, model, model_dir, model_name, samples, burn, thin, model_id) for model_id in range(n_models))
 
-def get_point_estimates_hierarchical(results, parameters):
 
-    results = results.loc[[('_subj' in i) for i in results.index], :]
+# def fit_ddm_per_subject(data, analysis_info, model, model_dir, model_name, n_runs=5, n_jobs=12):
 
-    all_params = []
-    for p in parameters:
-        temp = results.loc[[('{}_subj'.format(p) in i) for i in results.index], :]
-        if sum(['(' in i for i in temp.index]) > 0:
-            conditions = np.unique([temp.index[i][temp.index[i].find('(')+1:temp.index[i].find(')')] for i in range(temp.shape[0])])
-        else:
-            conditions = None
-        params = []
-        if conditions != None:
-            for c in conditions:
-                ind = np.array([temp.index[i][temp.index[i].find('(')+1:temp.index[i].find(')')] == c for i in range(temp.shape[0])])
-                values = temp.loc[ind, 'mean'].reset_index()
-                values['condition'] = c
-                values.columns = ['subj_idx', p, 'condition']
-                values['subj_idx'] = np.array([temp.index[i].split('.')[-1] for i in range(values.shape[0])], dtype=int)
-                params.append(values)
-        else:
-            values = temp.loc[:, 'mean'].reset_index()
-            values.columns = ['subj_idx', p]
-            values['condition'] = 0
-            values['subj_idx'] = np.arange(values.shape[0])
-            params.append(values)
-        params = pd.concat(params, axis=0).reset_index(drop=True)
-        all_params.append(params)
+#     res = Parallel(n_jobs=n_jobs)(delayed(fit_ddm_subject)(subj_data, analysis_info, subj_idx, model, model_dir, model_name, n_runs) for subj_idx, subj_data in data.groupby('subj_idx'))
     
-    df = pd.concat(all_params, axis=1)
-    df = df.loc[:,~df.columns.duplicated()]
-    df['subj_idx'] = df['subj_idx'].astype(int)
-    # df['condition'] = df['condition'].astype(int)
-    for p in parameters:
-        df[p] = df[p].astype(float)
+#     # # serial:
+#     # res = []
+#     # for subj_idx, subj_data in df.groupby('subj_idx'):
+#     #     res.append( fit_ddm_subject(subj_data, subj_idx, model, model_dir, model_name, n_runs) )
+    
+#     res = pd.concat(res, axis=0)
+#     res.to_csv(os.path.join(model_dir, '{}_params_flat.csv'.format(model_name)))
+#     return res
+    
+# def fit_ddm_subject(data, analysis_info, subj_idx, model, model_dir, model_name, n_runs=5):
+    
+#     import hddm
+#     import pandas as pd
+#     data = data.loc[data["subj_idx"]==subj_idx,:]
+#     exec('m = {}'.format(model), locals(), globals())
 
-    return df
+#     # starting values:
+#     if sum(np.isnan(data.loc[data['response']==0, 'rt'])) == sum(data['response']==0):
+#         # pass
+#         print('finding starting values via basic model!')
+#         basic_m = hddm.HDDMStimCoding(data, stim_col='stimulus', split_param='v', drift_criterion=False, bias=False, p_outlier=0)
+#         basic_m.approximate_map()
+#         basic_m.optimize('gsquare', quantiles=analysis_info['quantiles'], n_runs=n_runs)
+#         values_m = m.values
+        
+#         # for v in ['v', 'a', 't', 'z', 'z_trans', 'dc']:
+#         names = []
+#         best_values = []
+#         for v in ['v', 'a', 't',]:
+#             values_to_set = []
+#             for p in m.values:
+#                 if '{}'.format(v) == p:
+#                     values_to_set.append(p)
+#                 elif '{}('.format(v) in p:
+#                     values_to_set.append(p)
+#             for p in values_to_set:
+#                 try:
+#                     values_m[p] = basic_m.values['{}'.format(v)]
+#                     names.append(p)
+#                     best_values.append( basic_m.values['{}'.format(v)])
+#                 except:
+#                     pass
+#         m.set_values(dict(list(zip(names, best_values))))
+#         print(m.values)
+#     else:
+#         print('finding starting values!')
+#         m.approximate_map()
+#         print(m.values)
+    
+#     # optimize:
+#     print('fitting model!')
+#     m.optimize('gsquare', quantiles=analysis_info['quantiles'], n_runs=n_runs)
+#     res = pd.concat((pd.DataFrame([m.values], index=[subj_idx]), pd.DataFrame([m.bic_info], index=[subj_idx])), axis=1)
+#     # res['aic'] = m.aic
+#     # res['bic'] = m.bic
+
+#     return res
+
+# def load_ddm_per_subject(model_dir, model_name):
+    
+#     return pd.read_csv(os.path.join(model_dir, '{}_params_flat.csv'.format(model_name))).drop('Unnamed: 0', 1)
+
+# def get_point_estimates_hierarchical(results, parameters):
+
+#     results = results.loc[[('_subj' in i) for i in results.index], :]
+
+#     all_params = []
+#     for p in parameters:
+#         temp = results.loc[[('{}_subj'.format(p) in i) for i in results.index], :]
+#         if sum(['(' in i for i in temp.index]) > 0:
+#             conditions = np.unique([temp.index[i][temp.index[i].find('(')+1:temp.index[i].find(')')] for i in range(temp.shape[0])])
+#         else:
+#             conditions = None
+#         params = []
+#         if conditions != None:
+#             for c in conditions:
+#                 ind = np.array([temp.index[i][temp.index[i].find('(')+1:temp.index[i].find(')')] == c for i in range(temp.shape[0])])
+#                 values = temp.loc[ind, 'mean'].reset_index()
+#                 values['condition'] = c
+#                 values.columns = ['subj_idx', p, 'condition']
+#                 values['subj_idx'] = np.array([temp.index[i].split('.')[-1] for i in range(values.shape[0])], dtype=int)
+#                 params.append(values)
+#         else:
+#             values = temp.loc[:, 'mean'].reset_index()
+#             values.columns = ['subj_idx', p]
+#             values['condition'] = 0
+#             values['subj_idx'] = np.arange(values.shape[0])
+#             params.append(values)
+#         params = pd.concat(params, axis=0).reset_index(drop=True)
+#         all_params.append(params)
+    
+#     df = pd.concat(all_params, axis=1)
+#     df = df.loc[:,~df.columns.duplicated()]
+#     df['subj_idx'] = df['subj_idx'].astype(int)
+#     # df['condition'] = df['condition'].astype(int)
+#     for p in parameters:
+#         df[p] = df[p].astype(float)
+
+#     return df
 
 def get_point_estimates_flat(results):
     
