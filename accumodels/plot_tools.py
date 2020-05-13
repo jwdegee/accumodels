@@ -81,7 +81,7 @@ def summary_plot_group(df_group, df_sim_group=None, quantiles=[0, 0.1, 0.3, 0.5,
     counts_resp_emp = np.vstack(counts_resp_emp)
     counts_resp_sim = np.vstack(counts_resp_sim)
     
-    fig = plt.figure(figsize=(8,2))
+    fig = plt.figure(figsize=(6,1.5))
 
     # histogram:
     ax = fig.add_subplot(1,4,1)
