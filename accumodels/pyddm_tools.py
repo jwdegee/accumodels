@@ -15,8 +15,9 @@ from ddm import Sample
 from ddm import plot
 from ddm import models
 from ddm import Model, Fittable, Fitted, Bound, Overlay, Solution
+from ddm.models.loss import LossFunction
 from ddm.functions import fit_adjust_model, display_model
-from ddm.models import DriftConstant, NoiseConstant, BoundConstant, OverlayChain, OverlayNonDecision, OverlayPoissonMixture, OverlayUniformMixture, InitialCondition, ICPoint, ICPointSourceCenter, LossBIC
+from ddm.models import DriftConstant, NoiseConstant, BoundConstant, OverlayChain, OverlayNonDecision, OverlayPoissonMixture, OverlayUniformMixture, InitialCondition, ICPoint, ICPointSourceCenter, LossBIC, LossRobustBIC
 # from ddm import set_N_cpus
 
 from IPython import embed as shell
@@ -59,24 +60,135 @@ def make_z(sample, z_depends_on=[None]):
             return pdf
     return StartingPoint
 
-def make_drift(sample, drift_bias, v_depends_on=[None], b_depends_on=[None]):
+
+class StartingPoint(InitialCondition):
+    name = 'A starting point.'
+    required_parameters = ['a']
+    def get_IC(self, x, dx, conditions):
+        a = self.a
+        z = 10 - a
+        pdf = np.zeros(len(x))
+        pdf[np.where(x>=z)[0][0]] = 1
+        return pdf
+
+class DriftPulse(ddm.models.Drift):
+    name = 'Drift'
+    required_parameters = ['v', 'b', 'k', 'a']
+    required_conditions = ['start', 'duration']
+    def get_drift(self, x, t, conditions, **kwargs):
+        a = self.a
+        v = self.v
+        b = self.b
+        k = self.k
+        k_target = 10 - a
+        if t < conditions['start']:
+            return b - (k * (x-k_target))
+        elif (t >= conditions['start']) & (t < (conditions['start']+conditions['duration'])):
+            return v + b - (k * (x-k_target))
+        else:
+            return 0
+
+class StartingPoint_reward(InitialCondition):
+    name = 'A starting point.'
+    required_parameters = ['a0', 'a1']
+    required_conditions = ['reward']
+    def get_IC(self, x, dx, conditions):
+        a = getattr(self, 'a{}'.format(conditions['reward']))
+        z = 10 - a
+        pdf = np.zeros(len(x))
+        pdf[np.where(x>=z)[0][0]] = 1
+        return pdf
+
+class DriftPulse_reward(ddm.models.Drift):
+    name = 'Drift'
+    required_parameters = ['v0', 'b0', 'k0', 'a0', 'v1', 'b1', 'k1', 'a1']
+    required_conditions = ['start', 'duration', 'reward']
+    def get_drift(self, x, t, conditions, **kwargs):
+        a = getattr(self, 'a{}'.format(conditions['reward']))
+        v = getattr(self, 'v{}'.format(conditions['reward']))
+        b = getattr(self, 'b{}'.format(conditions['reward']))
+        k = getattr(self, 'k{}'.format(conditions['reward'])) * getattr(self, 'v{}'.format(conditions['reward']))
+        k_target = 10 - a
+        if t < conditions['start']:
+            return b - (k * (x-k_target))
+        elif (t >= conditions['start']) & (t < (conditions['start']+conditions['duration'])):
+            return v + b - (k * (x-k_target))
+        else:
+            return 0
+
+class NoisePulse(ddm.models.Noise):
+    name = "Noise"
+    required_parameters = ["noise"]
+    required_conditions = ['start', 'duration']
+    def get_noise(self, t, conditions, **kwargs):
+        
+        if t < (conditions['start']+conditions['duration']):
+            return self.noise
+        else:
+            return 0
+
+class Bound(Bound):
+    name = 'Hyperbolic collapsing bounds'
+    required_parameters = ['a']
+    required_conditions = []
+
+    def get_bound(self, t, conditions, **kwargs):
+        return self.a
+
+class NonDecisionTime(Overlay):
+    name = 'Non-decision time'
+    required_parameters = ['t']
+    def apply(self, solution):
+        # Unpack solution object
+        corr = solution.corr
+        err = solution.err
+        m = solution.model
+        cond = solution.conditions
+        undec = solution.undec
+        
+
+        shifts = int(self.t/m.dt) # truncate
+        # Shift the distribution
+        newcorr = np.zeros(corr.shape, dtype=corr.dtype)
+        newerr = np.zeros(err.shape, dtype=err.dtype)
+        if shifts > 0:
+            newcorr[shifts:] = corr[:-shifts]
+            newerr[shifts:] = err[:-shifts]
+        elif shifts < 0:
+            newcorr[:shifts] = corr[-shifts:]
+            newerr[:shifts] = err[-shifts:]
+        else:
+            newcorr = corr
+            newerr = err
+        return Solution(newcorr, newerr, m, cond, undec)
+
+
+
+
+def make_drift_attentional_effort(sample, drift_bias, leak, v_depends_on=[None], b_depends_on=[None], k_depends_on=[None]):
     
     v_names, v_unique_conditions = get_param_names(sample=sample, depends_on=v_depends_on, param='v')
     if drift_bias:
         b_names, b_unique_conditions = get_param_names(sample=sample, depends_on=b_depends_on, param='b')
     else:
         b_names = []
+    if leak:
+        k_names, k_unique_conditions = get_param_names(sample=sample, depends_on=k_depends_on, param='k')
+    else:
+        k_names = []
 
     class DriftStimulusCoding(ddm.models.Drift):
         name = 'Drift'
-        required_parameters = v_names + b_names
-        required_conditions = ['stimulus']
+        required_parameters = v_names + b_names + k_names
+        required_conditions = ['start', 'duration']
         if (v_depends_on is not None):
             required_conditions = list(set(required_conditions+v_depends_on))
         if (b_depends_on is not None):
             required_conditions = list(set(required_conditions+b_depends_on))
+        if (k_depends_on is not None):
+            required_conditions = list(set(required_conditions+k_depends_on))
 
-        def get_drift(self, conditions, **kwargs):
+        def get_drift(self, x, t, conditions, **kwargs):
             
             # v param:
             if v_depends_on is None:
@@ -94,9 +206,99 @@ def make_drift(sample, drift_bias, v_depends_on=[None], b_depends_on=[None]):
                     b_param = getattr(self, 'b{}'.format(conditions[b_depends_on[0]]))
                 elif len(b_unique_conditions) == 2:
                     b_param = getattr(self, 'b{}.{}'.format(conditions[b_depends_on[0]],conditions[b_depends_on[1]]))
-            
+
+            if leak:
+                # b param:
+                if k_depends_on is None:
+                    k_param = self.k
+                elif len(k_unique_conditions) == 1:
+                    k_param = getattr(self, 'k{}'.format(conditions[k_depends_on[0]]))
+                elif len(b_unique_conditions) == 2:
+                    k_param = getattr(self, 'k{}.{}'.format(conditions[k_depends_on[0]],conditions[k_depends_on[1]]))
+
             # return:
-                return b_param + (v_param * conditions['stimulus'])
+            if t < conditions['start']:
+                if drift_bias & leak:
+                    return b_param - (k_param * x)
+                elif drift_bias:
+                    return b_param
+                elif leak:
+                    return (k_param * x)
+                else:
+                    return 0
+            elif (t >= conditions['start']) & (t < (conditions['start']+conditions['duration'])):
+                if drift_bias & leak:
+                    return v_param + b_param - (k_param * x)
+                elif drift_bias:
+                    return v_param + b_param
+                elif leak:
+                    return v_param - (k_param * x)
+                else:
+                    return v_param
+            else:
+                return 0
+
+    return DriftStimulusCoding
+
+
+def make_drift(sample, drift_bias, leak, v_depends_on=[None], b_depends_on=[None], k_depends_on=[None]):
+    
+    v_names, v_unique_conditions = get_param_names(sample=sample, depends_on=v_depends_on, param='v')
+    if drift_bias:
+        b_names, b_unique_conditions = get_param_names(sample=sample, depends_on=b_depends_on, param='b')
+    else:
+        b_names = []
+    if leak:
+        k_names, k_unique_conditions = get_param_names(sample=sample, depends_on=k_depends_on, param='k')
+    else:
+        k_names = []
+
+    class DriftStimulusCoding(ddm.models.Drift):
+        name = 'Drift'
+        required_parameters = v_names + b_names + k_names
+        required_conditions = ['stimulus']
+        if (v_depends_on is not None):
+            required_conditions = list(set(required_conditions+v_depends_on))
+        if (b_depends_on is not None):
+            required_conditions = list(set(required_conditions+b_depends_on))
+        if (k_depends_on is not None):
+            required_conditions = list(set(required_conditions+k_depends_on))
+
+        def get_drift(self, x, conditions, **kwargs):
+            
+            # v param:
+            if v_depends_on is None:
+                v_param = self.v
+            elif len(v_unique_conditions) == 1:
+                v_param = getattr(self, 'v{}'.format(conditions[v_depends_on[0]]))
+            elif len(v_unique_conditions) == 2:
+                v_param = getattr(self, 'v{}.{}'.format(conditions[v_depends_on[0]],conditions[v_depends_on[1]]))
+
+            if drift_bias:
+                # b param:
+                if b_depends_on is None:
+                    b_param = self.b
+                elif len(b_unique_conditions) == 1:
+                    b_param = getattr(self, 'b{}'.format(conditions[b_depends_on[0]]))
+                elif len(b_unique_conditions) == 2:
+                    b_param = getattr(self, 'b{}.{}'.format(conditions[b_depends_on[0]],conditions[b_depends_on[1]]))
+
+            if leak:
+                # b param:
+                if k_depends_on is None:
+                    k_param = self.k
+                elif len(k_unique_conditions) == 1:
+                    k_param = getattr(self, 'k{}'.format(conditions[k_depends_on[0]]))
+                elif len(b_unique_conditions) == 2:
+                    k_param = getattr(self, 'k{}.{}'.format(conditions[k_depends_on[0]],conditions[k_depends_on[1]]))
+
+            # return:
+            if drift_bias & leak:
+                return (v_param * conditions['stimulus']) + b_param - (k_param * x)
+            elif drift_bias:
+                return (v_param * conditions['stimulus']) + b_param
+            elif leak:
+                return (v_param * conditions['stimulus']) - (k_param * x)
             else:
                 return (v_param * conditions['stimulus'])
     return DriftStimulusCoding
@@ -228,8 +430,10 @@ def make_model(sample, model_settings):
                 z_depends_on=model_settings['depends_on']['z'])
     drift = make_drift(sample=sample, 
                         drift_bias=model_settings['drift_bias'], 
+                        leak=model_settings['leak'], 
                         v_depends_on=model_settings['depends_on']['v'], 
-                        b_depends_on=model_settings['depends_on']['b'])
+                        b_depends_on=model_settings['depends_on']['b'],
+                        k_depends_on=model_settings['depends_on']['k'])
     a = make_a(sample=sample, 
                 urgency=model_settings['urgency'], 
                 a_depends_on=model_settings['depends_on']['a'], 
@@ -259,8 +463,8 @@ def make_model(sample, model_settings):
                 drift=drift(**{param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in drift.required_parameters}),
                 bound=a(**{param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in a.required_parameters}),
                 overlay=OverlayChain(overlays=[t(**{param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in t.required_parameters}),
-                                                OverlayUniformMixture(umixturecoef=0)]),
-                                                # OverlayPoissonMixture(pmixturecoef=.01, rate=1)]),
+                                                # OverlayUniformMixture(umixturecoef=0)]),
+                                                OverlayPoissonMixture(pmixturecoef=.05, rate=1)]),
                 noise=NoiseConstant(noise=1),
                 dx=.005, dt=.01, T_dur=T_dur)
     return model
@@ -272,14 +476,15 @@ def fit_model(df, model_settings, subj_idx):
 
     # make model
     model = make_model(sample=sample, model_settings=model_settings)
-    
+
     # fit:
     # model = fit_adjust_model(sample=sample, model=model, lossfunction=LossBIC, fitparams={'maxiter':5000})
-    model = fit_adjust_model(sample=sample, model=model, lossfunction=LossBIC)
+    model = fit_adjust_model(sample=sample, model=model, lossfunction=LossRobustBIC)
 
     # get params:
-    param_names = [component.required_parameters for component in model.dependencies]
-    param_names = [item for sublist in param_names for item in sublist]
+    # param_names = [component.required_parameters for component in model.dependencies]
+    # param_names = [item for sublist in param_names for item in sublist]
+    param_names = model.get_model_parameter_names()
     params = pd.DataFrame(np.atleast_2d([p.real for p in model.get_model_parameters()]), columns=param_names)
     params['bic'] = model.fitresult.value() 
     params['subj_idx'] = subj_idx
@@ -301,13 +506,15 @@ def simulate_data(df, params, model_settings, subj_idx, nr_trials=10000):
     model = make_model(sample=sample, model_settings=model_settings)
 
     # remove laps rate:
-    params['umixturecoef'] = 0
-    params['pmixturecoef'] = 0
+    params['umixturecoef'] = 0.05
+    params['pmixturecoef'] = 0.05
     params['rate'] = 1
+    params['noise'] = 1
 
     # set fitted parameters:
-    param_names = [component.required_parameters for component in model.dependencies]
-    param_names = [item for sublist in param_names for item in sublist]
+    # param_names = [component.required_parameters for component in model.dependencies]
+    # param_names = [item for sublist in param_names for item in sublist]
+    param_names = model.get_model_parameter_names()
     params_to_set = [Fitted(params.loc[(params['subj_idx']==subj_idx), param]) for param in param_names]
     model.set_model_parameters(params_to_set)
     
@@ -324,7 +531,7 @@ def simulate_data(df, params, model_settings, subj_idx, nr_trials=10000):
         if isinstance(ids, int):
             ids = [ids]
         
-        if len(ids) == 3:    
+        if len(ids) == 3:
             t = 't{}'.format(ids[1], ids[2])
         elif len(ids) == 2:
             t = 't{}'.format(ids[1])
