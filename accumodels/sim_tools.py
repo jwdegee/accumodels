@@ -4,13 +4,11 @@
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from IPython import embed as shel
+from IPython import embed as shell
 
 import matplotlib
-matplotlib.use("TkAgg")
+# matplotlib.use("TkAgg")
 from matplotlib import pyplot as plt
-
-from numba import jit
 
 def get_noise(noise_sd=1, nr_trials=1000, tmax=5, dt=0.001, diff_trace=True):
     if diff_trace:
@@ -98,26 +96,20 @@ def get_one_accumulator_traces(v, k, dc, z, stim, linear=True, noise_sd=1, dt=0.
     """
     one accumulator model
     
-    v:  mean drift rate
-    l: Ornstein-Uhlenbeck process parameter (effective leak / self-excitation)
-    z:  starting point
+    v: mean drift rate
+    k: Ornstein-Uhlenbeck process parameter (effective leak / self-excitation)
+    z: starting point
     dc: drift criterion
     """
-    
+
     # simulate:
-    x1 = np.zeros(stim.shape)
-    x1[:,:] = np.NaN
+    x1 = np.empty(stim.shape)
     x1[:,0] = z
     for i in range(stim.shape[1]-1):
-        
         if linear:
             x1[:,i+1] = x1[:,i] + (((v*stim[:,i]) + dc - (k*x1[:,i])) * dt) + np.random.normal(0,noise_sd,stim.shape[0])*np.sqrt(dt)
         else:
             x1[:,i+1] = np.clip(x1[:,i] + (((v*stim[:,i]) + dc - (k*x1[:,i])) * dt) + np.random.normal(0,noise_sd,stim.shape[0])*np.sqrt(dt), a_min=0, a_max=None)
-
-        # x1[:,i+1] = x1[:,i] + (((v*stim[:,i]) + dc - (k*x1[:,i])) * dt) + (np.random.normal(0,noise_sd/np.sqrt(2),stim.shape[0])*np.sqrt(dt))
-        # x1[:,i+1] = np.clip(x1[:,i] + (((v*stim[:,i]) + dc - (l*x1[:,i])) * dt) + (np.random.normal(0,noise_sd/np.sqrt(2),stim.shape[0])*np.sqrt(dt)), a_min=0, a_max=None)
-        # x1[:,i+1] = np.clip(x1[:,i] + (((v*stim[:,i]) + dc - (l*x1[:,i])) * dt) + (np.random.normal(0,noise_sd,stim.shape[0])*np.sqrt(dt)), a_min=0, a_max=None)
     return x1
 
 def get_LCA_traces(v, k, w, dc, z, noise_sd=1, pre_generated=False, stim=0, nr_trials=1000, tmax=5.0, dt=0.01):
@@ -192,14 +184,19 @@ def apply_bounds_diff_trace(x, b1, b0):
 
 def apply_bounds_accumulater_trace(x1, b1):
     
+    locs = np.argmax(x1>b1, axis=1)    
+    response = (locs>0).astype(int)
     rt = np.repeat(np.NaN, x1.shape[0])
-    response = np.zeros(x1.shape[0])
-    for i in range(x1.shape[0]):
-        for j in range(x1.shape[1]):
-            if x1[i,j] >= b1:
-                rt[i] = j
-                response[i] = 1
-                break
+    rt[response==1] = locs[response==1]
+
+    # rt = np.repeat(np.NaN, x1.shape[0])
+    # response = np.zeros(x1.shape[0])
+    # for i in range(x1.shape[0]):
+    #     for j in range(x1.shape[1]):
+    #         if x1[i,j] >= b1:
+    #             rt[i] = j
+    #             response[i] = 1
+    #             break
     return rt, response
 
 def apply_bounds_accumulater_traces(x1, x2, a=[0.15, 0.15],):
