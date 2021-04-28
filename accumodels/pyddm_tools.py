@@ -1,14 +1,15 @@
 #!/usr/bin/env python
 # encoding: utf-8
 
-import os
 import numpy as np
+from scipy.stats import exponnorm
 import pandas as pd
-import matplotlib
 import matplotlib.pyplot as plt
 import seaborn as sns
 import statsmodels.api as sm
 from joblib import Parallel, delayed
+
+import copy
 
 import ddm
 from ddm import Sample
@@ -33,6 +34,158 @@ from IPython import embed as shell
 #         pdf = np.zeros(len(x))
 #         pdf[np.where(x>=z)[0][0]] = 1
 #         return pdf
+
+class OverlayExponentialMixture(Overlay):
+    """An exponential mixture distribution.
+    The output distribution should be pmixturecoef*100 percent exponential
+    distribution and (1-umixturecoef)*100 percent of the distribution
+    to which this overlay is applied.
+    A mixture with the exponential distribution can be used to confer
+    robustness when fitting using likelihood.
+    Note that this is called OverlayPoissonMixture and not
+    OverlayExponentialMixture because the exponential distribution is
+    formed from a Poisson process, i.e. modeling a uniform lapse rate.
+    Example usage:
+      | overlay = OverlayPoissonMixture(pmixturecoef=.02, rate=1)
+    """
+    name = "Poisson distribution mixture model (lapse rate)"
+    required_parameters = ["pmixturecoef0", "pmixturecoef1", "rate0", "rate1"]
+    required_conditions = ['reward']
+    def apply(self, solution):
+        
+        corr = solution.corr
+        err = solution.err
+        m = solution.model
+        cond = solution.conditions
+        undec = solution.undec
+        evolution = solution.evolution
+
+        pmixturecoef = getattr(self, 'pmixturecoef{}'.format(cond['reward']))
+        rate = getattr(self, 'rate{}'.format(cond['reward']))
+        assert pmixturecoef >= 0 and pmixturecoef <= 1
+        assert isinstance(solution, Solution)
+
+        # To make this work with undecided probability, we need to
+        # normalize by the sum of the decided density.  That way, this
+        # function will never touch the undecided pieces.
+        
+        norm = np.sum(corr) #+ np.sum(err)
+        lapses = lambda t : 2*rate*np.exp(-1*rate*t)
+        X = m.dt * np.arange(0, len(corr))
+        Y = lapses(X)
+        Y /= np.sum(Y)
+        corr = corr*(1-pmixturecoef) + pmixturecoef*Y*norm # Assume numpy ndarrays, not lists
+        # err = err*(1-pmixturecoef) + .5*pmixturecoef*Y*norm
+        
+        return Solution(corr, err, m, cond, undec, evolution)
+
+class OverlayExGaussMixture(Overlay):
+    """An exponential mixture distribution.
+    The output distribution should be pmixturecoef*100 percent exponential
+    distribution and (1-umixturecoef)*100 percent of the distribution
+    to which this overlay is applied.
+    A mixture with the exponential distribution can be used to confer
+    robustness when fitting using likelihood.
+    Note that this is called OverlayPoissonMixture and not
+    OverlayExponentialMixture because the exponential distribution is
+    formed from a Poisson process, i.e. modeling a uniform lapse rate.
+    Example usage:
+      | overlay = OverlayPoissonMixture(pmixturecoef=.02, rate=1)
+    """
+    name = "Poisson distribution mixture model (lapse rate)"
+    required_parameters = ["mixture0", "mixture1"]
+    required_conditions = ['reward']
+    def apply(self, solution, mu=0.25, sigma=0.05, rate=5):
+        
+        corr = solution.corr
+        err = solution.err
+        m = solution.model
+        cond = solution.conditions
+        undec = solution.undec
+        evolution = solution.evolution
+
+        mixturecoef = getattr(self, 'mixture{}'.format(cond['reward']))
+        assert mixturecoef >= 0 and mixturecoef <= 1
+        assert isinstance(solution, Solution)
+
+        # To make this work with undecided probability, we need to
+        # normalize by the sum of the decided density.  That way, this
+        # function will never touch the undecided pieces.
+        
+        norm = np.sum(corr) #+ np.sum(err)
+        K = 1/(sigma*rate)
+        X = m.dt * np.arange(0, len(corr))
+        # X = np.linspace(0,5,1000)
+        Y = exponnorm.pdf(X, K, loc=mu, scale=sigma)
+        Y /= np.sum(Y)
+        # plt.plot(X,Y)
+        corr = corr*(1-mixturecoef) + mixturecoef*Y*norm # Assume numpy ndarrays, not lists
+
+        return Solution(corr, err, m, cond, undec, evolution)
+
+class OverlayEvidenceLapse(Overlay):
+    """An exponential mixture distribution.
+    The output distribution should be pmixturecoef*100 percent exponential
+    distribution and (1-umixturecoef)*100 percent of the distribution
+    to which this overlay is applied.
+    A mixture with the exponential distribution can be used to confer
+    robustness when fitting using likelihood.
+    Note that this is called OverlayPoissonMixture and not
+    OverlayExponentialMixture because the exponential distribution is
+    formed from a Poisson process, i.e. modeling a uniform lapse rate.
+    Example usage:
+      | overlay = OverlayPoissonMixture(pmixturecoef=.02, rate=1)
+    """
+    name = "evidence lapse"
+    required_parameters = ['lapse0', 'lapse1']
+    required_conditions = ['reward', 'start', 'duration']
+    def apply(self, solution):
+        
+        corr = solution.corr
+        err = solution.err
+        m = solution.model
+        cond = solution.conditions
+        undec = solution.undec
+        evolution = solution.evolution
+
+        lapse = getattr(self, 'lapse{}'.format(cond['reward']))
+        assert isinstance(solution, Solution)
+
+
+        # check what corr would look like with drift rate == 0
+        # ----------------------------------------------------
+
+        m2 = copy.copy(m)
+        
+        # set depenencies
+        dependencies = m.dependencies
+        for i in range(len(dependencies)):
+            if dependencies[i].depname == 'Overlay':
+                overlays = dependencies[i].overlays
+                for j in range(len(overlays)):
+                    if overlays[j].name == 'evidence lapse':
+                        overlays.pop(j)
+                dependencies[i] = OverlayChain(overlays=overlays)
+        m2.dependencies = dependencies
+
+        # set parameters:
+        param_names = m.get_model_parameter_names()
+        param_values = m.get_model_parameters()
+        for i in range(len(param_values)):
+            if param_names[i][0] == 'v':
+                param_values[i] = Fitted(0)
+        m2.set_model_parameters(param_values)
+
+        # solve:
+        solution2 = m2.solve(cond)
+        corr2 = solution2.corr
+
+        # ----------------------------------------------------
+        
+        # update corr:
+        corr = (corr*(1-lapse)) + (lapse*corr2) # Assume numpy ndarrays, not lists
+
+        return Solution(corr, err, m, cond, undec, evolution)
 
 class StartingPoint_reward(InitialCondition):
     name = 'A starting point.'
@@ -503,16 +656,19 @@ def make_model_one_accumulator(sample, model_settings):
             # 'b':(-0.21,-0.19),             # drift bias
             # 'k':(2.39,2.41),               # leak
             # 'z':(0.75,0.999),              # starting point --> translates into bound heigth 0-5
-            'v':(0,5),                       # drift rate
+            'v':(0,25),                      # drift rate
             'b':(-5,5),                      # drift bias
             'k':(0,5),                       # leak
-            'a':(0.1,2),                     # bound
+            'a':(0.1,5),                     # bound
             't':(0,.1),                      # non-decision time
+            'lapse':(0.001,0.999),           # lapse rate
+            'mixture':(0.001,0.999),           # mixture rate
             }
+    
     a0_value = Fittable(minval=ranges['a'][0], maxval=ranges['a'][1], default=1)
     a1_value = Fittable(minval=ranges['a'][0], maxval=ranges['a'][1], default=1)
-    v0_value = Fittable(minval=ranges['v'][0], maxval=ranges['a'][1], default=1)
-    v1_value = Fittable(minval=ranges['v'][0], maxval=ranges['a'][1], default=1)
+    v0_value = Fittable(minval=ranges['v'][0], maxval=ranges['v'][1], default=1)
+    v1_value = Fittable(minval=ranges['v'][0], maxval=ranges['v'][1], default=1)
 
     if model_settings['drift_bias'] & (model_settings['depends_on']['b'] == ['reward']):
         b0_value = Fittable(minval=ranges['b'][0], maxval=ranges['b'][1], default=0)
@@ -534,8 +690,26 @@ def make_model_one_accumulator(sample, model_settings):
         k0_value = 0
         k1_value = 0
 
+    if model_settings['lapse'] & (model_settings['depends_on']['lapse'] == ['reward']):
+        lapse0_value = Fittable(minval=ranges['lapse'][0], maxval=ranges['lapse'][1], default=0.1)
+        lapse1_value = Fittable(minval=ranges['lapse'][0], maxval=ranges['lapse'][1], default=0.1)
+    elif model_settings['lapse'] & (model_settings['depends_on']['lapse'] is None):
+        lapse0_value = Fittable(minval=ranges['lapse'][0], maxval=ranges['lapse'][1], default=0.1)
+        lapse1_value = lapse0_value
+    else:
+        lapse0_value = 0
+        lapse1_value = 0
 
-    
+    if model_settings['mixture'] & (model_settings['depends_on']['mixture'] == ['reward']):
+        mixture0_value = Fittable(minval=ranges['mixture'][0], maxval=ranges['mixture'][1], default=0.1)
+        mixture1_value = Fittable(minval=ranges['mixture'][0], maxval=ranges['mixture'][1], default=0.1)
+    elif model_settings['mixture'] & (model_settings['depends_on']['mixture'] is None):
+        mixture0_value = Fittable(minval=ranges['mixture'][0], maxval=ranges['mixture'][1], default=0.1)
+        mixture1_value = mixture0_value
+    else:
+        mixture0_value = 0
+        mixture1_value = 0
+
     # components:
     starting_point_components = {'a0':a0_value, 'a1':a1_value}
     drift_components = {
@@ -547,6 +721,8 @@ def make_model_one_accumulator(sample, model_settings):
                         'b1':b1_value,
                         'a0':a0_value, 
                         'a1':a1_value,}
+    mixture_components = {'mixture0':mixture0_value, 'mixture1':mixture1_value}
+    lapse_components = {'lapse0':lapse0_value, 'lapse1':lapse1_value}
 
     # build model:
     from ddm.models import DriftConstant, NoiseConstant, BoundConstant, OverlayChain, OverlayNonDecision, OverlayPoissonMixture, OverlayUniformMixture, InitialCondition, ICPoint, ICPointSourceCenter, LossBIC
@@ -561,11 +737,9 @@ def make_model_one_accumulator(sample, model_settings):
                 bound=bound(B=10),
                 overlay=OverlayChain(overlays=[t(t=0),
                                                 # t(**{param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in t.required_parameters}),
-                                                # OverlayUniformMixture(umixturecoef=0)
-                                                # OverlayUniformMixture(umixturecoef=0.01)
-                                                OverlayPoissonMixture(pmixturecoef=.1, rate=1)
+                                                OverlayExGaussMixture(**mixture_components),
+                                                OverlayEvidenceLapse(**lapse_components),
                                                 ]),
-                # overlay=OverlayChain(overlays=[t(t=0.1), OverlayUniformMixture(umixturecoef=0.01)]),
                 noise=n,
                 dx=model_settings['dx'], dt=model_settings['dt'], T_dur=model_settings['T_dur'])
 
@@ -788,18 +962,29 @@ def sample_from_condition(model, ids, nr_trials):
 
     return df
 
-def simulate_data_gonogo(df, params, model_settings, subj_idx, nr_trials=10000):
+def simulate_data_gonogo(params, model_settings, subj_idx, nr_trials=10000, rt_cutoff=0.1, n_jobs=24):
 
+    # generate trials:
+    target_mean = 5
+    target_max = 11
+    sig_dur = 3
+    tmax = target_max + sig_dur
+    dfs = []
+    for reward in [0,1]:
+        target_times = np.random.exponential(target_mean, nr_trials)
+        target_times = target_times[target_times<=target_max]
+        d = pd.DataFrame({'reward': np.repeat(reward, len(target_times)), 'start': target_times, 'duration': np.repeat(sig_dur, len(target_times))})
+        dfs.append(d)
+    df = pd.concat(dfs)
+    df['response'] = 1
+    df['rt'] = 1
+    df['start'] = np.round(np.floor(df['start']*4)/4,2)
+    
     # make sample:
     sample = Sample.from_pandas_dataframe(df=df, rt_column_name='rt', correct_column_name='response')
 
     # make model:
     model = make_model_one_accumulator(sample=sample, model_settings=model_settings)
-
-    # laps rate:
-    params['pmixturecoef'] = 0.1
-    params['rate'] = 1
-    params['noise'] = 1
 
     # set fitted parameters:
     param_names = model.get_model_parameter_names()
@@ -814,7 +999,6 @@ def simulate_data_gonogo(df, params, model_settings, subj_idx, nr_trials=10000):
     trial_nrs['trials'] = trial_nrs['trials'].astype(int)
     
     # resample:
-    n_jobs = 24
     res = Parallel(n_jobs=n_jobs)(delayed(sample_from_condition)(model=model, ids=ids, nr_trials=int(d['trials']))
                                     for ids, d in trial_nrs.groupby(model.required_conditions))
     
@@ -823,13 +1007,20 @@ def simulate_data_gonogo(df, params, model_settings, subj_idx, nr_trials=10000):
 
     # add:
     df_sim['subj_idx'] = subj_idx
-    df_sim['hit'] = 0
-    df_sim['fa'] = 0
-    df_sim['miss'] = 0
-    # df_sim['cr'] = 0
-    df_sim.loc[(df_sim['rt']>df_sim['start'])&(df_sim['rt']<=(df_sim['start']+df_sim['duration']))&(df_sim['response']==1), 'hit'] = 1
-    df_sim.loc[(df_sim['rt']<=df_sim['start'])&(df_sim['response']==1), 'fa'] = 1
-    df_sim.loc[(df_sim['hit']==0)&(df_sim['fa']==0), 'miss'] = 1
+    df_sim['hit'] = ((df_sim['rt']>df_sim['start'])&(df_sim['rt']<=(df_sim['start']+df_sim['duration']))&(df_sim['response']==1)).astype(int)
+    df_sim['fa'] = ((df_sim['rt']<=df_sim['start'])&(df_sim['response']==1)).astype(int)
+
+    # fix FA's:
+    df_sim = df_sim.loc[(df_sim['rt']>=rt_cutoff) | (df_sim['response']==0),:]
+    ind = (df_sim['hit']==1) & ((df_sim['rt']-df_sim['start'])<rt_cutoff)
+    df_sim.loc[ind, 'fa'] = 1
+    df_sim.loc[ind, 'hit'] = 0
+    df_sim.loc[df_sim['fa']==1, 'start'] = 14
+
+    # add:
+    df_sim['miss'] = ((df_sim['hit']==0)&(df_sim['fa']==0)).astype(int)
     df_sim['correct'] = (df_sim['hit']==1)
 
     return df_sim
+
+    # df_sim.loc[ (df_sim['hit']==1) & ((df_sim['rt']-df_sim['start'])<0.01),:]

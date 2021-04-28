@@ -305,74 +305,38 @@ def traces_plot(df, x1, x2, a, ndt):
     return fig
 
 
-def traces_plot():
+def traces_plot(x1, bound, dt, vmax):
 
-    hs = []
-    # for dt in [0.001, 0.01]:
-    for dt in [0.01]:
+    from copy import copy
+    import numpy.matlib
 
-        # dt = 0.01
-        nr_trials = 25000
-        v = 0.5
-        dc = 0
-        k = 5
+    nr_trials = x1.shape[0]
+    x = np.linspace(0, (x1.shape[1]*dt)-dt, x1.shape[1])
+    num_y_fine = 400
+    num_x_fine = int(max(x)/0.01)
+    x_fine = np.linspace(min(x), max(x), num_x_fine)
+    y_fine = np.empty((nr_trials, num_x_fine), dtype=float)
+    for i in range(nr_trials):
+        y_fine[i, :] = np.interp(x_fine, x, x1[i, :])
+    y_fine = y_fine.flatten()
+    x_fine = np.matlib.repmat(x_fine, nr_trials, 1).flatten()
 
-        # stimulus:
-        target_mean = 5
-        target_max = 11
-        sig_dur = 3
-        target_times = np.random.exponential(target_mean, nr_trials)
-        catch = target_times > target_max
-        target_times[catch] = target_max + sig_dur
-        stim = np.zeros((nr_trials, int((target_max+sig_dur)/dt)))
-        for i in range(nr_trials):
-            stim[i,int(target_times[i]/dt):int((target_times[i]+sig_dur)/dt)] = 1 
-            stim[i,int((target_times[i]+sig_dur)/dt):] = np.NaN 
+    h, xedges, yedges = np.histogram2d(x_fine, y_fine, bins=[np.linspace(min(x), max(x), num_x_fine), np.linspace(-1.6,1.6,num_y_fine)])
+    h = h / nr_trials
+    
+    cmap = copy(plt.cm.plasma)
+    cmap.set_bad(cmap(0))
+    
+    fig = plt.figure(figsize=(2.5,1.75))
+    ax = fig.add_subplot(111)
+    pcm = ax.pcolormesh(xedges, yedges, h.T, cmap=cmap,
+                        vmax=vmax, rasterized=True)
+    plt.axhline(bound, lw=1, color='red')
+    plt.axhline(0, lw=1, ls='--', color='red')
+    fig.colorbar(pcm, ax=ax, label="Probability", pad=0)
+    plt.xlim(0,7)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Decision variable')
+    plt.tight_layout()
 
-        # simulate:
-        x1 = np.empty(stim.shape)
-        x1[:,0] = z
-        for i in range(stim.shape[1]-1):
-            
-            if linear:
-                x1[:,i+1] = x1[:,i] + (((v*stim[:,i]) + dc - (k*x1[:,i])) * dt) + np.random.normal(0,noise_sd,stim.shape[0])*np.sqrt(dt)
-            else:
-                x1[:,i+1] = np.clip(x1[:,i] + (((v*stim[:,i]) + dc - (k*x1[:,i])) * dt) + np.random.normal(0,noise_sd,stim.shape[0])*np.sqrt(dt), a_min=0, a_max=None)
-
-        from copy import copy
-        import numpy.matlib
-        x = np.linspace(0,14,stim.shape[1])
-        num_fine = int(14/0.01)
-        x_fine = np.linspace(min(x), max(x), num_fine)
-        y_fine = np.empty((nr_trials, num_fine), dtype=float)
-        for i in range(nr_trials):
-            y_fine[i, :] = np.interp(x_fine, x, x1[i, :])
-        y_fine = y_fine.flatten()
-        x_fine = np.matlib.repmat(x_fine, nr_trials, 1).flatten()
-
-        h, xedges, yedges = np.histogram2d(x_fine, y_fine, bins=[np.linspace(0,14,1401), np.linspace(-2,2,401)])
-        cmap = copy(plt.cm.plasma)
-        cmap.set_bad(cmap(0))
-        
-        fig = plt.figure()
-        ax = fig.add_subplot(111)
-        pcm = ax.pcolormesh(xedges, yedges, h.T, cmap=cmap,
-                            vmax=np.percentile(h.T.ravel(), 99), rasterized=True)
-        fig.colorbar(pcm, ax=ax, label="# points", pad=0)
-
-        hs.append(h)
-
-        rt, response = apply_bounds_accumulater_trace(x1, b1=1)
-        rt = rt * dt
-        print()
-        print()
-        print(response.mean())
-
-        h = hs[0] - hs[1]
-
-        fig = plt.figure()
-        ax = fig.add_subplot(111)
-        pcm = ax.pcolormesh(xedges, yedges, h.T, cmap=cmap,
-                            vmin=-10, vmax=10, rasterized=True)
-        fig.colorbar(pcm, ax=ax, label="# points", pad=0)
-
+    return fig
