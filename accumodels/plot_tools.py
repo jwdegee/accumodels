@@ -31,7 +31,8 @@ sns.set(style='ticks', font='Arial', font_scale=1, rc={
     } )
 sns.plotting_context()
 
-def summary_plot_group(df_group, df_sim_group=None, quantiles=[0, 0.1, 0.3, 0.5, 0.7, 0.9,], step_size=0.05, xlim=None):
+def summary_plot_group(df_group, df_sim_group=None, quantiles=[0, 0.1, 0.3, 0.5, 0.7, 0.9,], step_size=0.05, 
+                        xlim=None, ylim_caf=None, ylim_crf=None):
 
     # # remove NaNs:
     # df = df.loc[~pd.isna(df.rt),:]
@@ -112,7 +113,10 @@ def summary_plot_group(df_group, df_sim_group=None, quantiles=[0, 0.1, 0.3, 0.5,
             fmt='-o', color='black', markersize=5)
     if xlim:
         ax.set_xlim(xlim)
-    ax.set_ylim(0, 1)
+    if ylim_caf:
+        ax.set_ylim(ylim_caf)
+    else:
+        ax.set_ylim(0, 1)
     ax.set_title('Conditional accuracy')
     ax.set_xlabel('RT (quantiles)')
     ax.set_ylabel('P(correct)')
@@ -159,7 +163,10 @@ def summary_plot_group(df_group, df_sim_group=None, quantiles=[0, 0.1, 0.3, 0.5,
     plt.axhline(0.5, lw=0.5, color='k')
     if xlim:
         ax.set_xlim(xlim)
-    ax.set_ylim(0, 0.9)
+    if ylim_crf:
+        ax.set_ylim(ylim_crf)
+    else:
+        ax.set_ylim(0, 0.9)
     ax.set_title('Conditional response')
     ax.set_xlabel('RT (quantiles)')
     ax.set_ylabel('P(bias)')
@@ -305,7 +312,7 @@ def traces_plot(df, x1, x2, a, ndt):
     return fig
 
 
-def traces_plot(x1, bound, dt, vmax):
+def traces_plot(x1, bound, dt, vmax, ylim=(-1.6,1.6)):
 
     from copy import copy
     import numpy.matlib
@@ -321,7 +328,7 @@ def traces_plot(x1, bound, dt, vmax):
     y_fine = y_fine.flatten()
     x_fine = np.matlib.repmat(x_fine, nr_trials, 1).flatten()
 
-    h, xedges, yedges = np.histogram2d(x_fine, y_fine, bins=[np.linspace(min(x), max(x), num_x_fine), np.linspace(-1.6,1.6,num_y_fine)])
+    h, xedges, yedges = np.histogram2d(x_fine, y_fine, bins=[np.linspace(min(x), max(x), num_x_fine), np.linspace(ylim[0],ylim[1],num_y_fine)])
     h = h / nr_trials
     
     cmap = copy(plt.cm.plasma)
@@ -334,7 +341,7 @@ def traces_plot(x1, bound, dt, vmax):
     plt.axhline(bound, lw=1, color='red')
     plt.axhline(0, lw=1, ls='--', color='red')
     fig.colorbar(pcm, ax=ax, label="Probability", pad=0)
-    plt.xlim(0,7)
+    plt.ylim(ylim)
     plt.xlabel('Time (s)')
     plt.ylabel('Decision variable')
     plt.tight_layout()

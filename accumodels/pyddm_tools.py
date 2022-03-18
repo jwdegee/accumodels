@@ -2,7 +2,8 @@
 # encoding: utf-8
 
 import numpy as np
-from scipy.stats import exponnorm
+import scipy as sp
+from scipy import stats
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -25,17 +26,94 @@ from IPython import embed as shell
 
 # set_N_cpus(16)
 
-# class StartingPoint(InitialCondition):
-#     name = 'A starting point.'
-#     required_parameters = ['a']
-#     def get_IC(self, x, dx, conditions):
-#         a = self.a
-#         z = 10 - a
-#         pdf = np.zeros(len(x))
-#         pdf[np.where(x>=z)[0][0]] = 1
-#         return pdf
+class OneAccumulatorNoise(ddm.models.Noise):
+    name = "Noise"
+    required_parameters = ["noise"]
+    required_conditions = ['start', 'duration']
+    def get_noise(self, t, conditions, **kwargs):
+        
+        if t < (conditions['start']+conditions['duration']):
+            return self.noise
+        else:
+            return 0
 
-class OverlayExponentialMixture(Overlay):
+class OneAccumulatorStartingPoint(InitialCondition):
+    name = 'A starting point.'
+    required_parameters = ['a0', 'a1', 'sz']
+    required_conditions = ['choice_p']
+    def get_IC(self, x, dx, conditions):
+        
+        a = getattr(self, 'a{}'.format(conditions['choice_p']))
+        sz = self.sz
+        x0 = 10 - a
+        # assert abs(x0) + abs(sz) < np.max(x), \
+        #     "Invalid x0 and sz: distribution goes past simulation boundaries"
+        pdf = np.zeros(len(x))
+        ind = (x>=x0)&(x<=(x0+sz))
+        if sum(ind) <= 1:
+            pdf[np.where(x>=x0)[0][0]] = 1
+        else:
+            pdf[ind] = 1
+        try:
+            pdf = pdf/np.sum(pdf)
+        except Exception as e:
+            print('x0 = {}'.format(x0))
+            print('sz = {}'.format(sz))
+            print(x)
+            print(pdf)
+            print(e)
+            raise ValueError('A very specific bad thing happened.')
+        return pdf
+
+class OneAccumulatorDrift(ddm.models.Drift):
+    name = 'Drift'
+    required_parameters = ['a0', 'a1', 'v', 'b', 'k', 'tt']
+    required_conditions = ['start', 'duration', 'choice_p']
+    def get_drift(self, x, t, conditions, **kwargs):
+        a = getattr(self, 'a{}'.format(conditions['choice_p']))
+        v = self.v
+        b = self.b
+        k = self.k
+        k_target = 10 - a
+        non_dec_time = self.tt
+        if t < (conditions['start'] + non_dec_time):
+            return b - (k * (x-k_target))
+        elif (t >= (conditions['start'] + non_dec_time)) & (t < (conditions['start']+conditions['duration'])):
+            return v + b - (k * (x-k_target))
+        else:
+            return 0
+
+class OneAccumulatorNonDecisionTime(Overlay):
+    name = 'Non-decision time'
+    required_parameters = ['t']
+    required_conditions = []
+    def apply(self, solution):
+        # Unpack solution object
+        corr = solution.corr
+        err = solution.err
+        m = solution.model
+        cond = solution.conditions
+        undec = solution.undec
+        
+        non_dec_time = self.t
+        shifts = int(non_dec_time/m.dt) # truncate
+        
+        # Shift the distribution
+        newcorr = np.zeros(corr.shape, dtype=corr.dtype)
+        newerr = np.zeros(err.shape, dtype=err.dtype)
+        if shifts > 0:
+            newcorr[shifts:] = corr[:-shifts]
+            # newerr[shifts:] = err[:-shifts]
+        elif shifts < 0:
+            newcorr[:shifts] = corr[-shifts:]
+            # newerr[:shifts] = err[-shifts:]
+        else:
+            newcorr = corr
+            # newerr = err
+        newerr = err
+        return Solution(newcorr, newerr, m, cond, undec)
+
+class OneAccumulatorOverlayGaussMixture(Overlay):
     """An exponential mixture distribution.
     The output distribution should be pmixturecoef*100 percent exponential
     distribution and (1-umixturecoef)*100 percent of the distribution
@@ -49,8 +127,8 @@ class OverlayExponentialMixture(Overlay):
       | overlay = OverlayPoissonMixture(pmixturecoef=.02, rate=1)
     """
     name = "Poisson distribution mixture model (lapse rate)"
-    required_parameters = ["pmixturecoef0", "pmixturecoef1", "rate0", "rate1"]
-    required_conditions = ['reward']
+    required_parameters = ["mixture", "mu", "sigma"]
+    required_conditions = []
     def apply(self, solution):
         
         corr = solution.corr
@@ -60,51 +138,10 @@ class OverlayExponentialMixture(Overlay):
         undec = solution.undec
         evolution = solution.evolution
 
-        pmixturecoef = getattr(self, 'pmixturecoef{}'.format(cond['reward']))
-        rate = getattr(self, 'rate{}'.format(cond['reward']))
-        assert pmixturecoef >= 0 and pmixturecoef <= 1
-        assert isinstance(solution, Solution)
-
-        # To make this work with undecided probability, we need to
-        # normalize by the sum of the decided density.  That way, this
-        # function will never touch the undecided pieces.
+        mixturecoef = self.mixture
+        mu = self.mu
+        sigma = self.sigma
         
-        norm = np.sum(corr) #+ np.sum(err)
-        lapses = lambda t : 2*rate*np.exp(-1*rate*t)
-        X = m.dt * np.arange(0, len(corr))
-        Y = lapses(X)
-        Y /= np.sum(Y)
-        corr = corr*(1-pmixturecoef) + pmixturecoef*Y*norm # Assume numpy ndarrays, not lists
-        # err = err*(1-pmixturecoef) + .5*pmixturecoef*Y*norm
-        
-        return Solution(corr, err, m, cond, undec, evolution)
-
-class OverlayExGaussMixture(Overlay):
-    """An exponential mixture distribution.
-    The output distribution should be pmixturecoef*100 percent exponential
-    distribution and (1-umixturecoef)*100 percent of the distribution
-    to which this overlay is applied.
-    A mixture with the exponential distribution can be used to confer
-    robustness when fitting using likelihood.
-    Note that this is called OverlayPoissonMixture and not
-    OverlayExponentialMixture because the exponential distribution is
-    formed from a Poisson process, i.e. modeling a uniform lapse rate.
-    Example usage:
-      | overlay = OverlayPoissonMixture(pmixturecoef=.02, rate=1)
-    """
-    name = "Poisson distribution mixture model (lapse rate)"
-    required_parameters = ["mixture0", "mixture1"]
-    required_conditions = ['reward']
-    def apply(self, solution, mu=0.25, sigma=0.05, rate=5):
-        
-        corr = solution.corr
-        err = solution.err
-        m = solution.model
-        cond = solution.conditions
-        undec = solution.undec
-        evolution = solution.evolution
-
-        mixturecoef = getattr(self, 'mixture{}'.format(cond['reward']))
         assert mixturecoef >= 0 and mixturecoef <= 1
         assert isinstance(solution, Solution)
 
@@ -113,17 +150,14 @@ class OverlayExGaussMixture(Overlay):
         # function will never touch the undecided pieces.
         
         norm = np.sum(corr) #+ np.sum(err)
-        K = 1/(sigma*rate)
         X = m.dt * np.arange(0, len(corr))
-        # X = np.linspace(0,5,1000)
-        Y = exponnorm.pdf(X, K, loc=mu, scale=sigma)
+        Y = sp.stats.norm.pdf(X, loc=mu, scale=sigma)
         Y /= np.sum(Y)
-        # plt.plot(X,Y)
         corr = corr*(1-mixturecoef) + mixturecoef*Y*norm # Assume numpy ndarrays, not lists
 
         return Solution(corr, err, m, cond, undec, evolution)
 
-class OverlayEvidenceLapse(Overlay):
+class OneAccumulatorOverlayEvidenceLapse(Overlay):
     """An exponential mixture distribution.
     The output distribution should be pmixturecoef*100 percent exponential
     distribution and (1-umixturecoef)*100 percent of the distribution
@@ -137,8 +171,8 @@ class OverlayEvidenceLapse(Overlay):
       | overlay = OverlayPoissonMixture(pmixturecoef=.02, rate=1)
     """
     name = "evidence lapse"
-    required_parameters = ['lapse0', 'lapse1']
-    required_conditions = ['reward', 'start', 'duration']
+    required_parameters = ['lapse', 'lapse_slope']
+    required_conditions = ['start', 'duration']
     def apply(self, solution):
         
         corr = solution.corr
@@ -147,10 +181,17 @@ class OverlayEvidenceLapse(Overlay):
         cond = solution.conditions
         undec = solution.undec
         evolution = solution.evolution
+        
+        time = cond['start']
+        lapse_offset = self.lapse
+        lapse_slope = self.lapse_slope
+        lapse = lapse_offset + (time * lapse_slope)
 
-        lapse = getattr(self, 'lapse{}'.format(cond['reward']))
+        # make sure that lapse is bounded between 0 and 1:
+        lapse = np.clip(lapse, 0, 1)
+
+        # assert:
         assert isinstance(solution, Solution)
-
 
         # check what corr would look like with drift rate == 0
         # ----------------------------------------------------
@@ -186,202 +227,6 @@ class OverlayEvidenceLapse(Overlay):
         corr = (corr*(1-lapse)) + (lapse*corr2) # Assume numpy ndarrays, not lists
 
         return Solution(corr, err, m, cond, undec, evolution)
-
-class StartingPoint_reward(InitialCondition):
-    name = 'A starting point.'
-    required_parameters = ['a0', 'a1']
-    required_conditions = ['reward']
-    def get_IC(self, x, dx, conditions):
-        a = getattr(self, 'a{}'.format(conditions['reward']))
-        start = 10 - a
-        pdf = np.zeros(len(x))
-        pdf[np.where(x>=start)[0][0]] = 1
-        return pdf
-
-def make_z_one_accumulator(sample, a_depends_on=[None]):
-    
-    a_names, a_unique_conditions = get_param_names(sample=sample, depends_on=a_depends_on, param='a')
-
-    class StartingPoint(InitialCondition):
-        name = 'A starting point.'
-        required_parameters = a_names
-        if not a_depends_on is None:
-            required_conditions = a_depends_on.copy()
-        def get_IC(self, x, dx, conditions):
-            pdf = np.zeros(len(x))
-            if a_depends_on is None:
-                a_param = self.a
-            elif len(a_unique_conditions) == 1:
-                a_param = getattr(self, 'a{}'.format(conditions[a_depends_on[0]]))
-            elif len(a_unique_conditions) == 2:
-                a_param = getattr(self, 'a{}.{}'.format(conditions[a_depends_on[0]], conditions[a_depends_on[1]]))
-            z_param = 10 - a_param
-            pdf[int(len(pdf)*z_param)] = 1
-            return pdf
-    return StartingPoint
-
-
-# class DriftPulse(ddm.models.Drift):
-#     name = 'Drift'
-#     required_parameters = ['v', 'b', 'k', 'a']
-#     required_conditions = ['start', 'duration']
-#     def get_drift(self, x, t, conditions, **kwargs):
-#         a = self.a
-#         v = self.v
-#         b = self.b
-#         k = self.k
-#         k_target = 10 - a
-#         if t < conditions['start']:
-#             return b - (k * (x-k_target))
-#         elif (t >= conditions['start']) & (t < (conditions['start']+conditions['duration'])):
-#             return v + b - (k * (x-k_target))
-#         else:
-#             return 0
-
-
-class DriftPulse_reward(ddm.models.Drift):
-    name = 'Drift'
-    required_parameters = ['v0', 'b0', 'k0', 'a0', 'v1', 'b1', 'k1', 'a1']
-    required_conditions = ['start', 'duration', 'reward']
-    def get_drift(self, x, t, conditions, **kwargs):
-        a = getattr(self, 'a{}'.format(conditions['reward']))
-        v = getattr(self, 'v{}'.format(conditions['reward']))
-        b = getattr(self, 'b{}'.format(conditions['reward']))
-        k = getattr(self, 'k{}'.format(conditions['reward']))
-        k_target = 10 - a
-        if t < conditions['start']:
-            return b - (k * (x-k_target))
-        elif (t >= conditions['start']) & (t < (conditions['start']+conditions['duration'])):
-            return v + b - (k * (x-k_target))
-        else:
-            return 0
-
-def make_drift_one_accumulator(sample, drift_bias, leak, v_depends_on=[None], b_depends_on=[None], k_depends_on=[None], a_depends_on=[None]):
-    
-    v_names, v_unique_conditions = get_param_names(sample=sample, depends_on=v_depends_on, param='v')
-    a_names, a_unique_conditions = get_param_names(sample=sample, depends_on=a_depends_on, param='a')
-    if drift_bias:
-        b_names, b_unique_conditions = get_param_names(sample=sample, depends_on=b_depends_on, param='b')
-    else:
-        b_names = []
-    if leak:
-        k_names, k_unique_conditions = get_param_names(sample=sample, depends_on=k_depends_on, param='k')
-    else:
-        k_names = []
-    
-    class DriftPulse(ddm.models.Drift):
-        name = 'Drift'
-        required_parameters = v_names + b_names + k_names + a_names
-        required_conditions = ['start', 'duration']
-        if (v_depends_on is not None):
-            required_conditions = list(set(required_conditions+v_depends_on))
-        if (b_depends_on is not None):
-            required_conditions = list(set(required_conditions+b_depends_on))
-        if (k_depends_on is not None):
-            required_conditions = list(set(required_conditions+k_depends_on))
-        if (a_depends_on is not None):
-            required_conditions = list(set(required_conditions+a_depends_on))
-
-        def get_drift(self, x, t, conditions, **kwargs):
-            
-            # v param:
-            if v_depends_on is None:
-                v_param = self.v
-            elif len(v_unique_conditions) == 1:
-                v_param = getattr(self, 'v{}'.format(conditions[v_depends_on[0]]))
-            elif len(v_unique_conditions) == 2:
-                v_param = getattr(self, 'v{}.{}'.format(conditions[v_depends_on[0]],conditions[v_depends_on[1]]))
-
-            # a param:
-            if a_depends_on is None:
-                a_param = self.a
-            elif len(a_unique_conditions) == 1:
-                a_param = getattr(self, 'a{}'.format(conditions[a_depends_on[0]]))
-            elif len(v_unique_conditions) == 2:
-                a_param = getattr(self, 'a{}.{}'.format(conditions[a_depends_on[0]],conditions[a_depends_on[1]]))
-
-            if drift_bias:
-                # b param:
-                if b_depends_on is None:
-                    b_param = self.b
-                elif len(b_unique_conditions) == 1:
-                    b_param = getattr(self, 'b{}'.format(conditions[b_depends_on[0]]))
-                elif len(b_unique_conditions) == 2:
-                    b_param = getattr(self, 'b{}.{}'.format(conditions[b_depends_on[0]],conditions[b_depends_on[1]]))
-            else:
-                b_param = 0
-
-            if leak:
-                # b param:
-                if k_depends_on is None:
-                    k_param = self.k
-                elif len(k_unique_conditions) == 1:
-                    k_param = getattr(self, 'k{}'.format(conditions[k_depends_on[0]]))
-                elif len(b_unique_conditions) == 2:
-                    k_param = getattr(self, 'k{}.{}'.format(conditions[k_depends_on[0]],conditions[k_depends_on[1]]))
-            else:
-                k_param = 0
-
-            # return:
-            k_target = 10 - a_param
-
-            print(k_target)
-            # print(t)
-
-            # shell()
-
-            if t < conditions['start']:
-                return b_param - (k_param * (x-k_target))
-            elif (t >= conditions['start']) & (t < (conditions['start']+conditions['duration'])):
-                return v_param + b_param - (k_param * (x-k_target))
-            else:
-                return 0
-
-    return DriftPulse
-
-class NoisePulse(ddm.models.Noise):
-    name = "Noise"
-    required_parameters = ["noise"]
-    required_conditions = ['start', 'duration']
-    def get_noise(self, t, conditions, **kwargs):
-        
-        if t < (conditions['start']+conditions['duration']):
-            return self.noise
-        else:
-            return 0
-
-class Bound(Bound):
-    name = 'Hyperbolic collapsing bounds'
-    required_parameters = ['a']
-    required_conditions = []
-
-    def get_bound(self, t, conditions, **kwargs):
-        return self.a
-
-class NonDecisionTime(Overlay):
-    name = 'Non-decision time'
-    required_parameters = ['t']
-    def apply(self, solution):
-        # Unpack solution object
-        corr = solution.corr
-        err = solution.err
-        m = solution.model
-        cond = solution.conditions
-        undec = solution.undec
-        shifts = int(self.t/m.dt) # truncate
-        # Shift the distribution
-        newcorr = np.zeros(corr.shape, dtype=corr.dtype)
-        newerr = np.zeros(err.shape, dtype=err.dtype)
-        if shifts > 0:
-            newcorr[shifts:] = corr[:-shifts]
-            newerr[shifts:] = err[:-shifts]
-        elif shifts < 0:
-            newcorr[:shifts] = corr[-shifts:]
-            newerr[:shifts] = err[-shifts:]
-        else:
-            newcorr = corr
-            newerr = err
-        return Solution(newcorr, newerr, m, cond, undec)
 
 def get_param_names(sample, depends_on, param):
 
@@ -420,7 +265,14 @@ def make_z(sample, z_depends_on=[None]):
     return StartingPoint
 
 def make_drift(sample, drift_bias, leak, v_depends_on=[None], b_depends_on=[None], k_depends_on=[None]):
-    
+
+    if 'run' in v_depends_on:
+        run_regressor = True
+        v_depends_on.remove('run')
+        print(v_depends_on)
+    else:
+        run_regressor = False
+
     v_names, v_unique_conditions = get_param_names(sample=sample, depends_on=v_depends_on, param='v')
     if drift_bias:
         b_names, b_unique_conditions = get_param_names(sample=sample, depends_on=b_depends_on, param='b')
@@ -435,12 +287,17 @@ def make_drift(sample, drift_bias, leak, v_depends_on=[None], b_depends_on=[None
         name = 'Drift'
         required_parameters = v_names + b_names + k_names
         required_conditions = ['stimulus']
+
         if (v_depends_on is not None):
             required_conditions = list(set(required_conditions+v_depends_on))
         if (b_depends_on is not None):
             required_conditions = list(set(required_conditions+b_depends_on))
         if (k_depends_on is not None):
             required_conditions = list(set(required_conditions+k_depends_on))
+        
+        if run_regressor:
+            required_conditions = list(set(required_conditions+['run']))
+            print(required_conditions)
 
         def get_drift(self, x, conditions, **kwargs):
             
@@ -460,6 +317,8 @@ def make_drift(sample, drift_bias, leak, v_depends_on=[None], b_depends_on=[None
                     b_param = getattr(self, 'b{}'.format(conditions[b_depends_on[0]]))
                 elif len(b_unique_conditions) == 2:
                     b_param = getattr(self, 'b{}.{}'.format(conditions[b_depends_on[0]],conditions[b_depends_on[1]]))
+            else:
+                b_param = 0
 
             if leak:
                 # b param:
@@ -469,16 +328,19 @@ def make_drift(sample, drift_bias, leak, v_depends_on=[None], b_depends_on=[None
                     k_param = getattr(self, 'k{}'.format(conditions[k_depends_on[0]]))
                 elif len(b_unique_conditions) == 2:
                     k_param = getattr(self, 'k{}.{}'.format(conditions[k_depends_on[0]],conditions[k_depends_on[1]]))
+            else:
+                k_param = 0
+            
+            if run_regressor:
+                run = conditions['run']
+            else:
+                run = 1
+
+            stim = conditions['stimulus']
 
             # return:
-            if drift_bias & leak:
-                return (v_param * conditions['stimulus']) + b_param - (k_param * x)
-            elif drift_bias:
-                return (v_param * conditions['stimulus']) + b_param
-            elif leak:
-                return (v_param * conditions['stimulus']) - (k_param * x)
-            else:
-                return (v_param * conditions['stimulus'])
+            return (v_param * stim * run) + b_param - (k_param * x)
+
     return DriftStimulusCoding
 
 def make_a(sample, urgency, a_depends_on=[None], u_depends_on=[None]):
@@ -602,53 +464,7 @@ def make_t(sample, t_depends_on=[None]):
 #     return DriftStimulusCoding
 
 
-def make_model_one_accumulator(sample, model_settings):
-
-    # # components:
-    # z = make_z_one_accumulator(sample=sample, 
-    #             a_depends_on=model_settings['depends_on']['a'])
-    # drift = make_drift_one_accumulator(sample=sample, 
-    #                 drift_bias=model_settings['drift_bias'], 
-    #                 leak=model_settings['leak'], 
-    #                 v_depends_on=model_settings['depends_on']['v'],
-    #                 b_depends_on=model_settings['depends_on']['b'],
-    #                 k_depends_on=model_settings['depends_on']['k'],
-    #                 a_depends_on=model_settings['depends_on']['v'],)
-    # bound = BoundConstant
-    # t = NonDecisionTime
-    # n = NoisePulse(noise=1)
-
-    # # limits:
-    # ranges = {
-
-    #         # 'v':(0.99,1.01),               # drift rate
-    #         # 'b':(-0.21,-0.19),             # drift bias
-    #         # 'k':(2.39,2.41),               # leak
-    #         # 'z':(0.75,0.999),              # starting point --> translates into bound heigth 0-5
-    #         'v':(0,5),                     # drift rate
-    #         'b':(-5,5),                    # drift bias
-    #         'k':(0,5),                     # leak
-    #         'a':(0.1,5),                   # bound
-    #         't':(0,.1),                    # non-decision time
-    #         }
-    
-    # # initialize params:
-    # a_params = {param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in z.required_parameters}
-    # drift_params = {param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in drift.required_parameters if not 'a' in param}
-    # drift_params = {**drift_params, **a_params}
-
-    # # put together:
-    # model = Model(name='one accumulator model',
-    #             IC=z(**a_params),
-    #             drift=drift(**drift_params),
-    #             bound=bound(B=10),
-    #             overlay=OverlayChain(overlays=[t(**{param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in t.required_parameters}),
-    #                                             # OverlayUniformMixture(umixturecoef=0)
-    #                                             # OverlayUniformMixture(umixturecoef=0.01)
-    #                                             OverlayPoissonMixture(pmixturecoef=.02, rate=1)
-    #                                             ]),
-    #             noise=n,
-    #             dx=.01, dt=.01, T_dur=T_dur)
+def make_model_one_accumulator(model_settings):
 
     # parameters:
     ranges = {
@@ -656,124 +472,99 @@ def make_model_one_accumulator(sample, model_settings):
             # 'b':(-0.21,-0.19),             # drift bias
             # 'k':(2.39,2.41),               # leak
             # 'z':(0.75,0.999),              # starting point --> translates into bound heigth 0-5
-            'v':(0,25),                      # drift rate
+            'v':(0,10),                      # drift rate
             'b':(-5,5),                      # drift bias
-            'k':(0,5),                       # leak
-            'a':(0.1,5),                     # bound
-            't':(0,.1),                      # non-decision time
+            'k':(-10,10),                    # leak
+            'a':(0.5,1.5),                   # bound
+            't':(0,0.1),                     # non-decision time
+            'sz':(0,1),                      # starting point variability
             'lapse':(0.001,0.999),           # lapse rate
-            'mixture':(0.001,0.999),           # mixture rate
+            'lapse_slope':(0,0.1),           # lapse rate slope
+            'mixture':(0.001,0.999),         # mixture rate
             }
     
-    a0_value = Fittable(minval=ranges['a'][0], maxval=ranges['a'][1], default=1)
-    a1_value = Fittable(minval=ranges['a'][0], maxval=ranges['a'][1], default=1)
-    v0_value = Fittable(minval=ranges['v'][0], maxval=ranges['v'][1], default=1)
-    v1_value = Fittable(minval=ranges['v'][0], maxval=ranges['v'][1], default=1)
-
-    if model_settings['drift_bias'] & (model_settings['depends_on']['b'] == ['reward']):
-        b0_value = Fittable(minval=ranges['b'][0], maxval=ranges['b'][1], default=0)
-        b1_value = Fittable(minval=ranges['b'][0], maxval=ranges['b'][1], default=0)
-    elif model_settings['drift_bias'] & (model_settings['depends_on']['b'] is None):
-        b0_value = Fittable(minval=ranges['b'][0], maxval=ranges['b'][1], default=0)
-        b1_value = b0_value
+    
+    if (model_settings['depends_on']['a'] is None):
+        a0_value = Fittable(minval=ranges['a'][0], maxval=ranges['a'][1], default=1)
+        a1_value = a0_value
     else:
-        b0_value = 0
-        b1_value = 0
+        a0_value = Fittable(minval=ranges['a'][0], maxval=ranges['a'][1], default=1)
+        a1_value = Fittable(minval=ranges['a'][0], maxval=ranges['a'][1], default=1)
+    
+    t_value = Fittable(minval=ranges['t'][0], maxval=ranges['t'][1], default=1)
+    v_value = Fittable(minval=ranges['v'][0], maxval=ranges['v'][1], default=1)
+    k_value = Fittable(minval=ranges['k'][0], maxval=ranges['k'][1], default=1)
+    b_value = 0
 
-    if model_settings['leak'] & (model_settings['depends_on']['k'] == ['reward']):
-        k0_value = Fittable(minval=ranges['k'][0], maxval=ranges['k'][1], default=1)
-        k1_value = Fittable(minval=ranges['k'][0], maxval=ranges['k'][1], default=1)
-    elif model_settings['leak'] & (model_settings['depends_on']['k'] is None):
-        k0_value = Fittable(minval=ranges['k'][0], maxval=ranges['k'][1], default=1)
-        k1_value = k0_value
+    if model_settings['lapse']:
+        lapse_value = Fittable(minval=ranges['lapse'][0], maxval=ranges['lapse'][1], default=0.5)
     else:
-        k0_value = 0
-        k1_value = 0
+        lapse_value = 0
 
-    if model_settings['lapse'] & (model_settings['depends_on']['lapse'] == ['reward']):
-        lapse0_value = Fittable(minval=ranges['lapse'][0], maxval=ranges['lapse'][1], default=0.1)
-        lapse1_value = Fittable(minval=ranges['lapse'][0], maxval=ranges['lapse'][1], default=0.1)
-    elif model_settings['lapse'] & (model_settings['depends_on']['lapse'] is None):
-        lapse0_value = Fittable(minval=ranges['lapse'][0], maxval=ranges['lapse'][1], default=0.1)
-        lapse1_value = lapse0_value
+    if model_settings['lapse_slope']:
+        lapse_slope_value = Fittable(minval=ranges['lapse_slope'][0], maxval=ranges['lapse_slope'][1], default=0.05)
     else:
-        lapse0_value = 0
-        lapse1_value = 0
+        lapse_slope_value = 0
 
-    if model_settings['mixture'] & (model_settings['depends_on']['mixture'] == ['reward']):
-        mixture0_value = Fittable(minval=ranges['mixture'][0], maxval=ranges['mixture'][1], default=0.1)
-        mixture1_value = Fittable(minval=ranges['mixture'][0], maxval=ranges['mixture'][1], default=0.1)
-    elif model_settings['mixture'] & (model_settings['depends_on']['mixture'] is None):
-        mixture0_value = Fittable(minval=ranges['mixture'][0], maxval=ranges['mixture'][1], default=0.1)
-        mixture1_value = mixture0_value
+    if model_settings['non_dec_t']:
+        tt_value = Fittable(minval=ranges['t'][0], maxval=ranges['t'][1], default=0.1)
     else:
-        mixture0_value = 0
-        mixture1_value = 0
+        tt_value = 0
+
+    if model_settings['sz']:
+        sz_value = Fittable(minval=ranges['sz'][0], maxval=ranges['sz'][1], default=0.1)
+    else:
+        sz_value = 0
+
+    if model_settings['mixture']:
+        mixture_value = Fittable(minval=ranges['mixture'][0], maxval=ranges['mixture'][1], default=0.1)
+        mu_value = Fittable(minval=0, maxval=0.5, default=0.2)
+        sigma_value = Fittable(minval=0.001, maxval=0.5, default=0.05)
+    else:
+        mixture_value = 0
+        mu_value = 0
+        sigma_value = 1
 
     # components:
-    starting_point_components = {'a0':a0_value, 'a1':a1_value}
+    starting_point_components = {'a0':a0_value, 'a1':a1_value, 'sz':sz_value}
     drift_components = {
-                        'v0':v0_value,
-                        'v1':v1_value,
-                        'k0':k0_value,
-                        'k1':k1_value,
-                        'b0':b0_value, 
-                        'b1':b1_value,
-                        'a0':a0_value, 
-                        'a1':a1_value,}
-    mixture_components = {'mixture0':mixture0_value, 'mixture1':mixture1_value}
-    lapse_components = {'lapse0':lapse0_value, 'lapse1':lapse1_value}
+                        'v':v_value,
+                        'k':k_value,
+                        'b':b_value,
+                        'a0':a0_value,
+                        'a1':a1_value,
+                        'tt':tt_value,
+                        }
+    mixture_components = {'mixture':mixture_value, 'mu':mu_value, 'sigma':sigma_value}
+    lapse_components = {'lapse':lapse_value, 'lapse_slope':lapse_slope_value}
+    non_dec_components = {'t':t_value, 't':t_value}
 
     # build model:
-    from ddm.models import DriftConstant, NoiseConstant, BoundConstant, OverlayChain, OverlayNonDecision, OverlayPoissonMixture, OverlayUniformMixture, InitialCondition, ICPoint, ICPointSourceCenter, LossBIC
-    bound = BoundConstant
-    a = StartingPoint_reward
-    drift = DriftPulse_reward
-    t = NonDecisionTime
-    n = NoisePulse(noise=1)
+    from ddm.models import BoundConstant, OverlayChain
     model = Model(name='one accumulator model',
-                IC=a(**starting_point_components),
-                drift=drift(**drift_components),
-                bound=bound(B=10),
-                overlay=OverlayChain(overlays=[t(t=0),
-                                                # t(**{param:Fittable(minval=ranges[param[0]][0], maxval=ranges[param[0]][1]) for param in t.required_parameters}),
-                                                OverlayExGaussMixture(**mixture_components),
-                                                OverlayEvidenceLapse(**lapse_components),
+                IC=OneAccumulatorStartingPoint(**starting_point_components),
+                drift=OneAccumulatorDrift(**drift_components),
+                bound=BoundConstant(B=10),
+                overlay=OverlayChain(overlays=[
+                                                OneAccumulatorNonDecisionTime(**non_dec_components),
+                                                OneAccumulatorOverlayGaussMixture(**mixture_components),
+                                                OneAccumulatorOverlayEvidenceLapse(**lapse_components),
                                                 ]),
-                noise=n,
+                noise=OneAccumulatorNoise(noise=1),
                 dx=model_settings['dx'], dt=model_settings['dt'], T_dur=model_settings['T_dur'])
-
-    # # fit:
-    # # model_fit = fit_adjust_model(sample=sample, model=model, lossfunction=LossLikelihood)
-    # try:
-        
-    #     model_fit = fit_adjust_model(sample=sample, model=model, lossfunction=LossLikelihoodGonogo, fitting_method="differential_evolution")
-        
-    #     # print('model: {}'.format(model_fit.solve({'stimulus':0}).prob_correct()))
-    #     # print('data: {}'.format(df.loc[df['stimulus']==0, 'response'].mean()))
-    #     # print()
-    #     # print('model: {}'.format(model_fit.solve({'stimulus':1}).prob_correct()))
-    #     # print('data: {}'.format(df.loc[df['stimulus']==1, 'response'].mean()))
-
-    #     # # plot:
-    #     # ddm.plot.plot_fit_diagnostics(model=model_fit, sample=sample)
-
-    #     # get params:
-    #     params = pd.DataFrame(np.atleast_2d([p.real for p in model_fit.get_model_parameters()]), columns=model_fit.get_model_parameter_names())
-    #     params['bic'] = model_fit.fitresult.value()
-    # except Exception as e: 
-        
-    #     print(e)
-    #     params = pd.DataFrame(np.atleast_2d([np.nan, np.nan, np.nan, np.nan]), columns=model.get_model_parameter_names())
+    
     return model
 
-def fit_model_one_accumulator(df, model_settings, subj_idx):
+def fit_model_one_accumulator(df, model_settings):
+
+    from ddm import set_N_cpus
+    set_N_cpus(14)
 
     # sample:
     sample = Sample.from_pandas_dataframe(df=df, rt_column_name='rt', correct_column_name='response')
 
     # make model
-    model = make_model_one_accumulator(sample=sample, model_settings=model_settings)
+    model = make_model_one_accumulator(model_settings=model_settings)
 
     # return model
 
@@ -788,7 +579,6 @@ def fit_model_one_accumulator(df, model_settings, subj_idx):
     param_names = model.get_model_parameter_names()
     params = pd.DataFrame(np.atleast_2d([p.real for p in model.get_model_parameters()]), columns=param_names)
     params['bic'] = model.fitresult.value() 
-    params['subj_idx'] = subj_idx
 
     return params
 
@@ -839,7 +629,7 @@ def make_model(sample, model_settings):
                 dx=.005, dt=.01, T_dur=T_dur)
     return model
 
-def fit_model(df, model_settings, subj_idx):
+def fit_model(df, model_settings):
 
     # sample:
     sample = Sample.from_pandas_dataframe(df=df, rt_column_name='rt', correct_column_name='response')
@@ -856,8 +646,7 @@ def fit_model(df, model_settings, subj_idx):
     # param_names = [item for sublist in param_names for item in sublist]
     param_names = model.get_model_parameter_names()
     params = pd.DataFrame(np.atleast_2d([p.real for p in model.get_model_parameters()]), columns=param_names)
-    params['bic'] = model.fitresult.value() 
-    params['subj_idx'] = subj_idx
+    params['bic'] = model.fitresult.value()
 
     return params
 
@@ -885,6 +674,7 @@ def simulate_data(df, params, model_settings, subj_idx, nr_trials=10000):
     # param_names = [component.required_parameters for component in model.dependencies]
     # param_names = [item for sublist in param_names for item in sublist]
     param_names = model.get_model_parameter_names()
+    print(param_names)
     params_to_set = [Fitted(params.loc[(params['subj_idx']==subj_idx), param]) for param in param_names]
     model.set_model_parameters(params_to_set)
     
@@ -949,46 +739,67 @@ def sample_from_condition(model, ids, nr_trials):
     samp = model.solve({key:value for value, key in zip(ids, model.required_conditions)}).resample(nr_trials)
 
     # to dataframe:
-    df = pd.DataFrame({
-        'rt': np.concatenate((samp.corr, samp.err)),
-        'response': np.concatenate((np.ones(len(samp.corr)), np.zeros(len(samp.err))))
-        })
+    df = pd.DataFrame({'rt': samp.corr,})
+    df['response'] = (df['rt']>0).astype(int)
+    df.loc[df['rt']<=0, 'rt'] = np.NaN
+
+    # meta:
     for value, key in zip(ids, model.required_conditions):
         df[key] = value
     
-    # fix:
-    df.loc[df['rt']<0, 'response'] = 0
-    df.loc[df['response']==0, 'rt'] = np.NaN
-
     return df
 
-def simulate_data_gonogo(params, model_settings, subj_idx, nr_trials=10000, rt_cutoff=0.1, n_jobs=24):
+def simulate_data_gonogo(df, params, model_settings, nr_trials=10000, rt_cutoff=0.1, n_jobs=24):
+
+    # previous choice:
+    choice_p_fraction = df['choice_p'].mean()
 
     # generate trials:
-    target_mean = 5
-    target_max = 11
+    noise_dur_mean = 5
+    noise_dur_max = 11
     sig_dur = 3
-    tmax = target_max + sig_dur
+    # tmax = noise_dur_max + sig_dur
     dfs = []
     for reward in [0,1]:
-        target_times = np.random.exponential(target_mean, nr_trials)
-        target_times = target_times[target_times<=target_max]
-        d = pd.DataFrame({'reward': np.repeat(reward, len(target_times)), 'start': target_times, 'duration': np.repeat(sig_dur, len(target_times))})
+        noise_durs = np.random.exponential(noise_dur_mean, nr_trials)
+        noise_durs[noise_durs>=noise_dur_max] = noise_dur_max
+        # noise_durs = noise_durs[noise_durs<=noise_dur_max]
+        d = pd.DataFrame({'reward': np.repeat(reward, len(noise_durs)), 'noise_dur': noise_durs, 'duration': np.repeat(sig_dur, len(noise_durs))})
         dfs.append(d)
     df = pd.concat(dfs)
     df['response'] = 1
     df['rt'] = 1
-    df['start'] = np.round(np.floor(df['start']*4)/4,2)
-    
+
+    # bin
+    shift = 'min'
+    df['start'] = df['noise_dur'].copy()
+    df.loc[(df['start']<11), 'bins'] = pd.cut(df.loc[(df['start']<11), 'start'], bins=[-1,1,2,3,4,5,6,7,8,9,10,11], labels=False)
+    df.loc[df['start']==11, 'bins'] = df['bins'].max()+1
+    print(df.groupby(['bins'])['start'].mean())
+    if shift == 'min':
+        df['start'] = df.groupby(['bins'])['start'].transform(lambda x: x.min())
+    if shift == 'max':
+        df['start'] = df.groupby(['bins'])['start'].transform(lambda x: x.max())
+    if shift == 'mean':
+        df['start'] = df.groupby(['bins'])['start'].transform(lambda x: x.mean())
+    print(df.groupby(['bins'])['start'].mean())
+    df['start'] = df['start'].round(1)
+
+    # add choice_p:
+    df['choice_p'] = (np.random.rand(df.shape[0])<choice_p_fraction).astype(int)
+
     # make sample:
     sample = Sample.from_pandas_dataframe(df=df, rt_column_name='rt', correct_column_name='response')
 
     # make model:
-    model = make_model_one_accumulator(sample=sample, model_settings=model_settings)
+    model = make_model_one_accumulator(model_settings=model_settings)
 
     # set fitted parameters:
     param_names = model.get_model_parameter_names()
-    params_to_set = [Fitted(params.loc[(params['subj_idx']==subj_idx), param]) for param in param_names]
+    try:
+        params_to_set = [Fitted(params[param]) for param in param_names]
+    except:
+        print(param_names)
     model.set_model_parameters(params_to_set)
     
     # compute number of trials to generate:
@@ -997,6 +808,7 @@ def simulate_data_gonogo(params, model_settings, subj_idx, nr_trials=10000, rt_c
     trial_nrs = df.groupby(model.required_conditions).count()['trials']
     trial_nrs = (trial_nrs / sum(trial_nrs) * nr_trials).reset_index()
     trial_nrs['trials'] = trial_nrs['trials'].astype(int)
+    print(trial_nrs)
     
     # resample:
     res = Parallel(n_jobs=n_jobs)(delayed(sample_from_condition)(model=model, ids=ids, nr_trials=int(d['trials']))
@@ -1004,22 +816,6 @@ def simulate_data_gonogo(params, model_settings, subj_idx, nr_trials=10000, rt_c
     
     # concat:
     df_sim = pd.concat(res)
-
-    # add:
-    df_sim['subj_idx'] = subj_idx
-    df_sim['hit'] = ((df_sim['rt']>df_sim['start'])&(df_sim['rt']<=(df_sim['start']+df_sim['duration']))&(df_sim['response']==1)).astype(int)
-    df_sim['fa'] = ((df_sim['rt']<=df_sim['start'])&(df_sim['response']==1)).astype(int)
-
-    # fix FA's:
-    df_sim = df_sim.loc[(df_sim['rt']>=rt_cutoff) | (df_sim['response']==0),:]
-    ind = (df_sim['hit']==1) & ((df_sim['rt']-df_sim['start'])<rt_cutoff)
-    df_sim.loc[ind, 'fa'] = 1
-    df_sim.loc[ind, 'hit'] = 0
-    df_sim.loc[df_sim['fa']==1, 'start'] = 14
-
-    # add:
-    df_sim['miss'] = ((df_sim['hit']==0)&(df_sim['fa']==0)).astype(int)
-    df_sim['correct'] = (df_sim['hit']==1)
 
     return df_sim
 
