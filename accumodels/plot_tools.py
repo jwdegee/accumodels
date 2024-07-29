@@ -160,7 +160,7 @@ def summary_plot_group(df_group, df_sim_group=None, quantiles=[0, 0.1, 0.3, 0.5,
         ax.errorbar(x=d.groupby(['rt_bin'])["rt"].mean(), y=d.groupby(['rt_bin'])["response"].mean(), 
             xerr=d.groupby(['rt_bin'])["rt"].sem(), yerr=d.groupby(['rt_bin'])["response"].sem(), 
             fmt='-o', color='black', markersize=5)
-    plt.axhline(0.5, lw=0.5, color='k')
+    # plt.axhline(0.5, lw=0.5, color='k')
     if xlim:
         ax.set_xlim(xlim)
     if ylim_crf:

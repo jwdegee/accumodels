@@ -585,6 +585,17 @@ def fit_model_one_accumulator(df, model_settings):
 
 def make_model(sample, model_settings):
     
+    # fitting parameters:
+    T_dur = model_settings['T_dur']
+    if 'dx' in model_settings:
+        dx = model_settings['dx']
+    else:
+        dx = 0.001
+    if 'dt' in model_settings:
+        dt = model_settings['dt']
+    else:
+        dt = 0.01
+
     # model components:
     z = make_z(sample=sample, 
                 z_depends_on=model_settings['depends_on']['z'])
@@ -600,8 +611,7 @@ def make_model(sample, model_settings):
                 u_depends_on=model_settings['depends_on']['u'])
     t = make_t(sample=sample, 
                 t_depends_on=model_settings['depends_on']['t'])
-    T_dur = model_settings['T_dur']
-
+    
     # limits:
     ranges = {
             'z':(0.05,0.95),               # starting point
@@ -626,7 +636,7 @@ def make_model(sample, model_settings):
                                                 # OverlayUniformMixture(umixturecoef=0)]),
                                                 OverlayPoissonMixture(pmixturecoef=.05, rate=1)]),
                 noise=NoiseConstant(noise=1),
-                dx=.005, dt=.01, T_dur=T_dur)
+                dx=dx, dt=dt, T_dur=T_dur)
     return model
 
 def fit_model(df, model_settings):

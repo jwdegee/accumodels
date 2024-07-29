@@ -15,6 +15,9 @@ from joblib import Memory
 from joblib import Parallel, delayed
 from IPython import embed as shell
 
+def sv_link_func(x):
+    return np.where(x > 0, x ,0)
+
 def fit_ddm(df, model_settings, model_dir, model_name, subj_idx=None, samples=5000, burn=1000, thin=1, model_id=0, n_runs=5):
     
     # fix depends_on:
@@ -26,11 +29,57 @@ def fit_ddm(df, model_settings, model_dir, model_name, subj_idx=None, samples=50
         depends_on.pop('u', None)
         depends_on = {k: v for k, v in depends_on.items() if v is not None}
 
-    if model_settings['fit'] == 'hddm':
+    print(depends_on)
+
+    if model_settings['fit'] == 'hddm_r':
+        
+        v_reg = {'model': 'v ~ 1 + stimulus * condition', 'link_func': lambda x:x}
+        z_reg = {'model': 'z ~ 1 + condition', 'link_func': lambda x: x}
+        a_reg = {'model': 'a ~ 1 + condition', 'link_func': lambda x: x}
+        t_reg = {'model': 't ~ 1 + condition', 'link_func': lambda x: x}
+        sv_reg = {'model': 'sv ~ 1', 'link_func': lambda x:x}
+        if model_settings['name'] == 'all':
+            pass
+        elif model_settings['name'] == 'z':
+            v_reg = {'model': 'v ~ 1 + stimulus + stimulus:condition', 'link_func': lambda x:x}
+        elif model_settings['name'] == 'dc':
+            z_reg = {'model': 'z ~ 1', 'link_func': lambda x: x}
+        if 'sv' in model_name:
+            sv_reg = {'model': 'sv ~ 1 + condition', 'link_func': lambda x:x}
+        else:
+            sv_reg = {'model': 'sv ~ 1', 'link_func': lambda x:x}
+        regs = [a_reg, v_reg, z_reg, t_reg, sv_reg]
+        print(regs)
+        print(df.head())
+        m = hddm.HDDMRegressor(df, 
+                                regs, 
+                                include=(['z', 'sv']), 
+                                is_group_model = True,
+                                group_only_regressors=False, 
+                                p_outlier=.01,
+                                informative = False)
+        # else:
+        #     regs = [a_reg, t_reg, v_reg, z_reg]
+        
+            # model = 'ddm' # nonlinear bound collapse, captured by 2 parameters
+            # m = hddm.HDDMnnRegressor(df,
+            #                         regs,
+            #                         model = model,
+            #                         include = hddm.simulators.model_config[model]['hddm_include'],
+            #                         p_outlier = 0.01,
+            #                         is_group_model = True,
+            #                         group_only_regressors=False,
+            #                         informative = False)
+        m.sample(samples, burn=burn, thin=thin, dbname=os.path.join(model_dir, '{}_{}.db'.format(model_name, model_id)), db='pickle')
+        m.save(os.path.join(model_dir, '{}_{}.hddm'.format(model_name, model_id)))
+
+        return
+
+    elif model_settings['fit'] == 'hddm':
         
         m = hddm.HDDMStimCoding(df, stim_col='stimulus', split_param='v', drift_criterion=True, bias=True, 
-                                # depends_on=depends_on, include=('sv'), group_only_nodes=['sv'], p_outlier=0)
-                                depends_on=depends_on, p_outlier=0)
+                                include=('sv'), group_only_nodes=['sv'],
+                                depends_on=depends_on, p_outlier=0.01)
 
         # fit:
         m.find_starting_values()
@@ -52,7 +101,6 @@ def fit_ddm(df, model_settings, model_dir, model_name, subj_idx=None, samples=50
         params.columns.name = None
         params = params.reset_index()
         params = params.sort_values(by=['subj_idx'])
-
 
     elif model_settings['fit'] == 'hddm_q':
         
